@@ -4,13 +4,28 @@ Asistente de IA con voz, visión, monitoreo de pantalla y toma de decisiones aut
 
 Versión: 1.3.0
 
+[![CI](https://github.com/Chriss-devv/Samantha/actions/workflows/ci.yml/badge.svg)](https://github.com/Chriss-devv/Samantha/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![LLMs](https://img.shields.io/badge/LLMs-Ollama%20%2B%20OpenAI-green)
+
 ## 🚀 Inicio Rápido
 
 ```bash
-python sam.py
+git clone https://github.com/Chriss-devv/Samantha.git
+cd Samantha
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# Configura tu API key (ignorado por git)
+cp .env.example .env        # edita .env y pon tu OPENAI_API_KEY
+
+python sam.py               # arranca (modo voz OFF por defecto)
+python sam.py --voice       # con voz
 ```
 
-**Voice mode OFF por defecto.** Usar `--voice` para habilitar.
+> **Requisitos**: Python 3.11+, [Ollama](https://ollama.com) para modelos locales
+> y, opcionalmente, una `OPENAI_API_KEY` en `.env`. Las dependencias de voz y
+> visión se instalan aparte (ver [Instalación](#-instalación)).
 
 ---
 
@@ -174,3 +189,27 @@ modules/
 ---
 
 Documentación completa en `docs/`
+
+---
+
+## 🛠️ Desarrollo
+
+```bash
+make dev      # deps + herramientas de dev (ruff, pytest)
+make lint     # ruff
+make test     # pytest (smoke: compila todo el codigo)
+make compile  # chequeo de sintaxis
+```
+
+Ver [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## 🔒 Seguridad
+
+- Los secretos (`OPENAI_API_KEY`) viven en `.env`, **ignorado por git** (usa `.env.example`).
+- No se versionan `.env`, `config.json`, `*.db` ni datos personales.
+- Reportes de vulnerabilidades: ver [SECURITY.md](SECURITY.md).
+
+## 📄 Licencia
+
+Pendiente de definir por el autor (**Chris-devv**). Si quieres que otros puedan
+usarla, añade una licencia (MIT/Apache-2.0).
