@@ -1,0 +1,27 @@
+# Entorno virtual
+.venv/
+.venv-linux/
+venv/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+
+# Secretos / config real (NO se versiona)
+.env
+config.json
+
+# Datos / modelos / builds
+*.db
+*.log
+build/
+dist/
+voice-ai-build/
+voice-ai-remote/
+*.012
+
+# Sistema
+.DS_Store
