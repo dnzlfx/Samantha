@@ -7,7 +7,6 @@ import logging
 import os
 from pathlib import Path
 from typing import List, Dict, Optional
-import hashlib
 from datetime import datetime
 
 logger = logging.getLogger(__name__)

@@ -7,11 +7,7 @@ import logging
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.layout import Layout
-from rich.text import Text
 from rich.markdown import Markdown
-from rich.syntax import Syntax
-from rich.live import Live
 from typing import Dict, Optional
 import psutil
 

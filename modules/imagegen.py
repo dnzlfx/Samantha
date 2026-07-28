@@ -320,8 +320,8 @@ class ImageGenerator:
             logger.info(f"[Sam] Local image generated: {filepath}")
             return str(filepath)
             
-        except ImportError as e:
-            logger.error(f"[Sam] Local gen requires: pip install diffusers torch")
+        except ImportError:
+            logger.error("[Sam] Local gen requires: pip install diffusers torch")
             return None
         except Exception as e:
             logger.error(f"[Sam] Local gen error: {e}")

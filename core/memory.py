@@ -6,7 +6,6 @@ Long-term memory using SQLite for conversation history and learned patterns.
 import logging
 import sqlite3
 from typing import Dict, List, Optional
-from datetime import datetime
 import json
 from pathlib import Path
 

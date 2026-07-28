@@ -4,7 +4,7 @@ Interactive prompt system with command history and special commands.
 """
 
 import logging
-from typing import List, Optional
+from typing import List
 from pathlib import Path
 from rich.prompt import Prompt
 from rich.console import Console

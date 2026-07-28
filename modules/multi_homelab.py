@@ -4,7 +4,7 @@ Manages multiple SSH connections to homelab servers.
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from modules.homelab import HomeLab
 from rich.console import Console
 from rich.table import Table

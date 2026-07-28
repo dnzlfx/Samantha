@@ -7,7 +7,6 @@ Provides image analysis (llava), camera capture (OpenCV), and OCR (Tesseract)
 import os
 import logging
 import base64
-from pathlib import Path
 from typing import Optional, Dict, Any
 import tempfile
 
@@ -196,8 +195,8 @@ class OCRProcessor:
             pytesseract.get_tesseract_version()
         except ImportError:
             logger.warning("[Vision] pytesseract not installed. Install with: pip install pytesseract")
-        except Exception as e:
-            logger.warning(f"[Vision] Tesseract not found. Install with: sudo pacman -S tesseract tesseract-data-spa")
+        except Exception:
+            logger.warning("[Vision] Tesseract not found. Install with: sudo pacman -S tesseract tesseract-data-spa")
     
     def extract_text(self, image_path: str) -> Dict[str, Any]:
         """
@@ -266,8 +265,8 @@ def test_vision():
     
     # Test VisionAnalyzer
     print("1. Testing llava image analysis...")
-    analyzer = VisionAnalyzer()
-    
+    VisionAnalyzer()
+
     # Test CameraCapture
     print("\n2. Testing camera capture...")
     camera = CameraCapture()
@@ -278,8 +277,8 @@ def test_vision():
     
     # Test OCR
     print("\n3. Testing OCR...")
-    ocr = OCRProcessor()
-    
+    OCRProcessor()
+
     print("\n=== Tests Complete ===")
 
 

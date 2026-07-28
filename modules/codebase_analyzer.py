@@ -6,7 +6,7 @@ Enables understanding of entire projects for agentic workflows
 
 import os
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -192,7 +192,7 @@ File types:"""
         for ext, count in sorted(scan_result['file_types'].items(), key=lambda x: x[1], reverse=True):
             summary += f"\n  {ext}: {count} files"
         
-        summary += f"\n\nKey files (by relevance):"
+        summary += "\n\nKey files (by relevance):"
         for i, file_path in enumerate(key_files[:10], 1):
             summary += f"\n  {i}. {file_path}"
         

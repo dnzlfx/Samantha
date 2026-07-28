@@ -119,7 +119,7 @@ class SessionManager:
                         'message_count': metadata.get('message_count', 0),
                         'preview': preview
                     })
-                except Exception as e:
+                except Exception:
                     continue
         except FileNotFoundError:
             pass

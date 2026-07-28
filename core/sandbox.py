@@ -7,7 +7,6 @@ import logging
 import subprocess
 import sys
 import os
-import tempfile
 import shlex
 from typing import Dict, Optional
 from pathlib import Path
@@ -193,11 +192,11 @@ class SandboxExecutor:
                 
                 # Attempt auto-correction if enabled and not last attempt
                 if auto_correct and attempt < self.MAX_RETRIES - 1 and self.model_manager:
-                    logger.info(f"[Sam] Attempting auto-correction...")
+                    logger.info("[Sam] Attempting auto-correction...")
                     corrected_code = self._auto_correct(current_code, result['error'])
                     
                     if corrected_code and corrected_code != current_code:
-                        print(f"🔧 Generando corrección automática...\n")
+                        print("🔧 Generando corrección automática...\n")
                         current_code = corrected_code
                     else:
                         logger.warning("[Sam] Auto-correction failed to generate new code")
@@ -423,8 +422,7 @@ CÓDIGO CORREGIDO:
                 output_lines.append(remaining.rstrip())
             
             stderr_output = process.stderr.read()
-            error_lines = stderr_output.split('\n') if stderr_output else []
-            
+
             return_code = process.wait(timeout=timeout)
             
             print(f"\n{'='*60}")

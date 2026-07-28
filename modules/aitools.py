@@ -13,8 +13,7 @@ import logging
 import os
 import time
 import json
-import subprocess
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 from pathlib import Path
 from datetime import datetime
 

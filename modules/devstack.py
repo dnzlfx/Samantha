@@ -6,8 +6,7 @@ PHP/MySQL development assistant and stack management.
 import logging
 import subprocess
 import os
-from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 

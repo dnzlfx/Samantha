@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import os
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -181,7 +181,7 @@ class ScreenMonitor:
                     
                     self.screen_context['last_screenshot'] = screenshot_path
                     self.screen_context['analysis_time'] = datetime.now()
-                    logger.info(f"[ScreenMonitor] Screenshot updated")
+                    logger.info("[ScreenMonitor] Screenshot updated")
                 
                 # Longer interval - just keeping screenshots fresh
                 time.sleep(30)  # 30 seconds instead of 10

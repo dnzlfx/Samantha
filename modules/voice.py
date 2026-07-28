@@ -5,7 +5,6 @@ Enables voice interaction with wake word "Sam"
 """
 
 import threading
-import queue
 import time
 from typing import Optional, Callable
 import logging
@@ -72,7 +71,7 @@ class WakeWordDetector:
                 self.recognizer.dynamic_energy_adjustment_damping = 0.15
                 self.recognizer.dynamic_energy_ratio = 1.5
                 print(f"[Voice] Energy threshold: {self.recognizer.energy_threshold} (dynamic)")
-                print(f"[Voice] 💡 Tip: Habla CLARO y FUERTE cerca del micrófono")
+                print("[Voice] 💡 Tip: Habla CLARO y FUERTE cerca del micrófono")
                 sys.stdout.flush()
                 logger.info(f"[Voice] Energy threshold: {self.recognizer.energy_threshold}")
             
@@ -134,18 +133,13 @@ class WakeWordDetector:
                         # Longer timeout to reduce network calls
                         audio = self.recognizer.listen(source, timeout=2, phrase_time_limit=3)
                     
-                    # Calculate audio duration for debugging (silent)
-                    import wave
-                    import io
-                    duration = len(audio.get_raw_data()) / (audio.sample_rate * audio.sample_width)
-                    
                     try:
                         # Use Google STT for wake word (fast and reliable)
                         text = self.recognizer.recognize_google(audio, language="es-ES").lower()
                         
                         # Check if wake word detected
                         if self.wake_word in text:
-                            print(f"[Voice] 🔔 Wake word detected")
+                            print("[Voice] 🔔 Wake word detected")
                             sys.stdout.flush()
                             
                             # Call interrupt function if available (for stopping TTS)
