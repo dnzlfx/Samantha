@@ -5,7 +5,7 @@ Detects user intent and automatically calls appropriate APIs without confirmatio
 """
 
 import re
-from typing import Dict, Optional, List, Tuple
+from typing import Optional, List, Tuple
 from enum import Enum
 
 
@@ -307,75 +307,6 @@ class IntentDetector:
                 if match:
                     return match.group(1).strip()
             return "bitcoin"  # Default
-        
-        # Return cleaned query if no specific entity found
-        return query.strip()
-    
-    def extract_entity(self, query: str, intent: Intent) -> Optional[str]:
-        """
-        Extract the main entity/subject from query based on intent.
-        
-        Examples:
-            "quien es elon musk" -> "elon musk"
-            "clima en madrid" -> "madrid"
-            "receta de tacos" -> "tacos"
-        """
-        query_lower = query.lower()
-        
-        if intent == Intent.BIOGRAPHY:
-            # Extract person name after "quien es", "who is", etc.
-            patterns = [
-                r'(?:quien es|quién es|who is|tell me about|háblame de)\s+(.+)',
-                r'(?:biografía de|biography of)\s+(.+)',
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, query_lower)
-                if match:
-                    return match.group(1).strip()
-        
-        elif intent == Intent.WEATHER:
-            # Extract city name
-            patterns = [
-                r'(?:clima en|weather in|temperatura en|temperature in)\s+(.+)',
-                r'(?:clima de|weather of)\s+(.+)',
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, query_lower)
-                if match:
-                    return match.group(1).strip()
-        
-        elif intent == Intent.COUNTRY_INFO:
-            # Extract country name
-            patterns = [
-                r'(?:país|country|pais)\s+(.+)',
-                r'(?:capital de|capital of|población de|population of)\s+(.+)',
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, query_lower)
-                if match:
-                    return match.group(1).strip()
-        
-        elif intent == Intent.BOOK_SEARCH:
-            # Extract book title
-            patterns = [
-                r'libro.*(?:sobre|de|llamado|called)\s+(.+)',
-                r'busca.*libro.*"([^"]+)"',
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, query_lower)
-                if match:
-                    return match.group(1).strip()
-        
-        elif intent == Intent.RECIPE:
-            # Extract dish name
-            patterns = [
-                r'receta.*(?:de|para|of|for)\s+(.+)',
-                r'cómo (?:cocinar|preparar|hacer|cook|make)\s+(.+)',
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, query_lower)
-                if match:
-                    return match.group(1).strip()
         
         # Return cleaned query if no specific entity found
         return query.strip()
