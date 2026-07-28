@@ -7,6 +7,9 @@ import subprocess
 import shlex
 import hashlib
 import json
+
+from core.command_safety import is_allowlisted
+
 # Nueva librería actualizada
 try:
     from ddgs import DDGS
@@ -72,16 +75,7 @@ CURRENT_WORKING_DIR = os.path.expanduser("~")  # v7.9: Persistent working direct
 
 def is_safe_command(cmd):
     """Check if command is in safe list"""
-    base_cmd = cmd.strip().split()[0] if cmd.strip() else ""
-    
-    if base_cmd in SAFE_COMMANDS:
-        return True
-    
-    for safe in SAFE_COMMANDS:
-        if cmd.strip().startswith(safe):
-            return True
-    
-    return False
+    return is_allowlisted(cmd, SAFE_COMMANDS)
 
 def execute_command(command, auto_approve=False):
     """Execute shell command with optional confirmation - supports interactive commands"""

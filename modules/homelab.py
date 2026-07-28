@@ -4,12 +4,12 @@ SSH-based remote server management with security controls.
 """
 
 import logging
-import subprocess
-import shlex
 import sys
 from typing import Dict, Optional, List
 import paramiko
 from pathlib import Path
+
+from core.command_safety import is_allowlisted
 
 logger = logging.getLogger(__name__)
 
@@ -98,20 +98,13 @@ class HomeLab:
         Returns:
             True if safe, False if dangerous
         """
+        if not is_allowlisted(command, self.SAFE_COMMANDS):
+            return False
+
+        # Allowlisted, but still reject explicitly dangerous forms such as
+        # `systemctl restart` (allowed prefix `systemctl status` aside).
         command_lower = command.lower().strip()
-        
-        # Check if starts with any safe command
-        for safe_cmd in self.SAFE_COMMANDS:
-            if command_lower.startswith(safe_cmd):
-                return True
-        
-        # Check for dangerous patterns
-        for dangerous in self.DANGEROUS_PATTERNS:
-            if dangerous in command_lower:
-                return False
-        
-        # If not in safe list and no dangerous patterns, treat as potentially dangerous
-        return False
+        return not any(pattern in command_lower for pattern in self.DANGEROUS_PATTERNS)
     
     def connect(self) -> bool:
         """
@@ -172,7 +165,7 @@ class HomeLab:
             from rich.console import Console
             
             console = Console()
-            console.print(f"\n[red]⚠️  DANGEROUS COMMAND DETECTED[/red]")
+            console.print("\n[red]⚠️  DANGEROUS COMMAND DETECTED[/red]")
             console.print(f"[yellow]Command:[/yellow] {command}")
             console.print(f"[yellow]Server:[/yellow] {self.user}@{self.host}")
             
@@ -187,9 +180,9 @@ class HomeLab:
                     'cancelled': True
                 }
         
-        # Sanitize command
-        safe_command = shlex.quote(command)
-        
+        # Note: the command runs through a remote shell as-is. Safety comes from
+        # the allowlist gate above plus explicit confirmation, not from quoting.
+
         # Connect if not already connected
         if not self.ssh_client or not self.ssh_client.get_transport() or not self.ssh_client.get_transport().is_active():
             if not self.connect():
@@ -517,7 +510,6 @@ class HomeLab:
         """Complete system diagnostic"""
         from rich.console import Console
         from rich.table import Table
-        from rich.panel import Panel
         
         console = Console()
         console.print("\n[cyan]═══════════════ DIAGNÓSTICO COMPLETO ═══════════════[/cyan]\n")
@@ -600,7 +592,7 @@ class HomeLab:
         
         # Find and copy docker-compose files
         result = self.execute_remote(
-            f"find /opt /home -name 'docker-compose*.yml' -o -name 'docker-compose*.yaml' 2>/dev/null | head -20",
+            "find /opt /home -name 'docker-compose*.yml' -o -name 'docker-compose*.yaml' 2>/dev/null | head -20",
             require_confirmation=False, stream_output=False
         )
         
@@ -635,7 +627,7 @@ class HomeLab:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        print(f"\n[Backup] Creando backup de volúmenes Docker...")
+        print("\n[Backup] Creando backup de volúmenes Docker...")
         
         # Get list of volumes
         if not volumes:
@@ -697,7 +689,7 @@ class HomeLab:
         paths = paths or default_paths
         paths_str = " ".join(paths)
         
-        print(f"\n[Backup] Creando backup de configuraciones...")
+        print("\n[Backup] Creando backup de configuraciones...")
         
         result = self.execute_remote(
             f"tar czf {backup_file} {paths_str} 2>/dev/null || true",
