@@ -1,0 +1,194 @@
+{
+  "name": "Voice Gateway Actions",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "voice-gateway-action",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-voice-gateway-action",
+      "name": "Webhook POST /voice-gateway-action",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "voice-gateway-action"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "token-check",
+              "leftValue": "={{ $json.headers['x-voice-token'] }}",
+              "rightValue": "={{ $env.VOICE_WEBHOOK_TOKEN }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "validate-token",
+      "name": "Validate x-voice-token",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [260, 0]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "conditions": [{ "leftValue": "={{ $json.body.action }}", "rightValue": "health_check", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "conditions": { "conditions": [{ "leftValue": "={{ $json.body.action }}", "rightValue": "discord_notify", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "conditions": { "conditions": [{ "leftValue": "={{ $json.body.action }}", "rightValue": "admin_openclaw_status", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "conditions": { "conditions": [{ "leftValue": "={{ $json.body.action }}", "rightValue": "admin_openclaw_logs", "operator": { "type": "string", "operation": "equals" } }] } },
+            { "conditions": { "conditions": [{ "leftValue": "={{ $json.body.action }}", "rightValue": "admin_restart_openclaw", "operator": { "type": "string", "operation": "equals" } }] } }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "id": "switch-action",
+      "name": "Switch action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [520, -80]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, action: 'health_check', service: 'n8n', ts: new Date().toISOString() } }}",
+        "options": {}
+      },
+      "id": "respond-health",
+      "name": "Respond health_check",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [820, -360]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DISCORD_WEBHOOK_URL || 'http://127.0.0.1:9/not-configured' }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "content", "value": "={{ $json.body.text || 'Voice Gateway notification' }}" }
+          ]
+        },
+        "options": { "timeout": 8000 }
+      },
+      "id": "discord-notify",
+      "name": "Discord notify optional",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [820, -220],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://voice-admin-runner:8088/action",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "x-voice-token", "value": "={{ $env.ADMIN_RUNNER_TOKEN }}" }] },
+        "sendBody": true,
+        "bodyParameters": { "parameters": [{ "name": "action", "value": "openclaw_status" }] },
+        "options": { "timeout": 8000 }
+      },
+      "id": "admin-status",
+      "name": "Admin openclaw_status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [820, -80]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://voice-admin-runner:8088/action",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "x-voice-token", "value": "={{ $env.ADMIN_RUNNER_TOKEN }}" }] },
+        "sendBody": true,
+        "bodyParameters": { "parameters": [{ "name": "action", "value": "openclaw_logs_tail" }, { "name": "tail", "value": "80" }] },
+        "options": { "timeout": 8000 }
+      },
+      "id": "admin-logs",
+      "name": "Admin openclaw_logs_tail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [820, 60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://voice-admin-runner:8088/action",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "x-voice-token", "value": "={{ $env.ADMIN_RUNNER_TOKEN }}" }] },
+        "sendBody": true,
+        "bodyParameters": { "parameters": [{ "name": "action", "value": "restart_openclaw" }, { "name": "confirmation", "value": "={{ $json.body.confirmation }}" }] },
+        "options": { "timeout": 30000 }
+      },
+      "id": "admin-restart",
+      "name": "Admin restart_openclaw",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [820, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, action: $json.body?.action || 'unknown', result: $json } }}",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Respond JSON",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1120, -20]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: false, error: 'unauthorized' } }}",
+        "options": { "responseCode": 401 }
+      },
+      "id": "respond-unauthorized",
+      "name": "Respond unauthorized",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [520, 220]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: false, error: 'unsupported_action', action: $json.body?.action } }}",
+        "options": { "responseCode": 400 }
+      },
+      "id": "respond-unsupported",
+      "name": "Respond unsupported",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [820, 360]
+    }
+  ],
+  "connections": {
+    "Webhook POST /voice-gateway-action": { "main": [[{ "node": "Validate x-voice-token", "type": "main", "index": 0 }]] },
+    "Validate x-voice-token": { "main": [[{ "node": "Switch action", "type": "main", "index": 0 }], [{ "node": "Respond unauthorized", "type": "main", "index": 0 }]] },
+    "Switch action": { "main": [[{ "node": "Respond health_check", "type": "main", "index": 0 }], [{ "node": "Discord notify optional", "type": "main", "index": 0 }], [{ "node": "Admin openclaw_status", "type": "main", "index": 0 }], [{ "node": "Admin openclaw_logs_tail", "type": "main", "index": 0 }], [{ "node": "Admin restart_openclaw", "type": "main", "index": 0 }], [{ "node": "Respond unsupported", "type": "main", "index": 0 }]] },
+    "Discord notify optional": { "main": [[{ "node": "Respond JSON", "type": "main", "index": 0 }]] },
+    "Admin openclaw_status": { "main": [[{ "node": "Respond JSON", "type": "main", "index": 0 }]] },
+    "Admin openclaw_logs_tail": { "main": [[{ "node": "Respond JSON", "type": "main", "index": 0 }]] },
+    "Admin restart_openclaw": { "main": [[{ "node": "Respond JSON", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false,
+  "versionId": "voice-gateway-actions-0.1"
+}

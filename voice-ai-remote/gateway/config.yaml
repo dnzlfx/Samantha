@@ -1,0 +1,211 @@
+server:
+  name: voice-gateway
+  log_file: /logs/voice-gateway.log
+  log_level: INFO
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  frame_ms: 30
+  input_backend: alsa_arecord
+  input_alsa_device: plughw:1,0
+  input_device_name: GENERAL WEBCAM
+  input_device: null
+  input_gain: 4.0
+  max_input_gain: 16.0
+  max_input_peak: 0.85
+  vad_pregain: 2.0
+  wake_input_gain: 4.0
+  stt_input_gain: 4.0
+  command_input_gain: 4.0
+  output_device: 6
+  output_sample_rate: 48000
+  max_record_seconds: 12
+  phrase_end_silence_ms: 900
+  post_tts_mic_cooldown_ms: 700
+
+wakeword:
+  enabled: true
+  provider: wyoming
+  uri: tcp://voice-wakeword:10400
+  name: hey_jarvis
+  timeout_seconds: 30
+  fallback_stt_enabled: true
+  fallback_stt_phrases:
+    - hey jarvis
+    - jarvis
+    - oye jarvis
+    - asistente
+    - oye asistente
+    - sam
+    - sum
+    - samantha
+    - oye sam
+    - oye sum
+    - oye samantha
+  fallback_stt_timeout_seconds: 30
+  fallback_stt_window_seconds: 2
+  fallback_stt_min_voice_ms: 60
+
+conversation:
+  followup_window_seconds: 8
+  max_followup_turns: 2
+  wake_ack_text: "Te escucho."
+  unknown_text: "No entendí, repite por favor."
+
+vad:
+  provider: webrtc
+  aggressiveness: 2
+  min_voice_ms: 450
+  max_silence_ms: 900
+
+stt:
+  provider: wyoming
+  uri: tcp://voice-whisper:10300
+  timeout_seconds: 25
+  wake_timeout_seconds: 8
+  command_timeout_seconds: 12
+  min_text_chars: 3
+  pre_gain_enabled: true
+
+tts:
+  provider: wyoming
+  uri: tcp://voice-piper:10200
+  timeout_seconds: 10
+  max_chars: 700
+  current_voice: es_ES-sharvard-medium
+  preferred_gender: female
+  preferred_language: es
+  preferred_locale:
+    - es_MX
+    - es_ES
+    - es
+  speaking_style: professional_soft
+  fallback_keep_current_voice: true
+
+tts_style:
+  voice_profile: female_professional_soft
+  concise: true
+  tone: professional_soft
+  max_spoken_chars: 350
+  prefer_short_ack: true
+  alarm_voice_intro: true
+  music_voice_intro: true
+
+openclaw:
+  enabled: true
+  url: ws://openclaw:18790
+  agent_default: main
+  rpc_method: null
+  require_confirmation: true
+  dry_run: true
+  max_prompt_chars: 2000
+
+confirmation:
+  yes_aliases:
+    - si
+    - sí
+    - sip
+    - sim
+    - 'yes'
+    - claro
+    - correcto
+    - confirma
+    - confirmo
+    - envialo
+    - envíalo
+    - mandalo
+    - mándalo
+    - dale
+    - afirmativo
+    - va
+    - okay
+    - ok
+  no_aliases:
+    - 'no'
+    - cancelar
+    - cancela
+    - salir
+    - no importa
+    - olvidalo
+    - olvídalo
+    - negativo
+assistant:
+  concise_responses: true
+  max_response_chars: 350
+  max_response_sentences: 2
+  speak_ack_short: true
+
+conversation_memory:
+  enabled: true
+  max_turns: 12
+  clear_on_cancel: true
+  clear_on_timeout: false
+  storage_path: /logs/conversation_memory.json
+
+scheduler:
+  enabled: true
+  db_path: /logs/reminders.sqlite3
+  timezone: America/Chicago
+  check_interval_seconds: 1
+  alarm_music_enabled: true
+  alarm_music_dir: /media/alarm-music
+  alarm_music_extensions:
+    - .mp3
+    - .wav
+    - .flac
+    - .ogg
+    - .m4a
+  alarm_music_random: true
+  alarm_music_max_seconds: 180
+  alarm_music_fade_out_seconds: 2
+  alarm_repeat_seconds: 20
+  alarm_max_repeats: 5
+  default_alarm_sound_text: "Alarma."
+  default_reminder_prefix: "Recordatorio:"
+  allow_daily_alarms: true
+  allow_one_shot_reminders: true
+
+barge_in:
+  enabled: true
+  interrupt_phrases:
+    - asistente
+    - cancelar
+    - salir
+    - detente
+    - alto
+    - para
+    - no importa
+  tts_chunk_chars: 220
+  stop_tts_on_cancel: true
+
+n8n:
+  enabled: true
+  base_url: http://n8n:5678
+  voice_webhook_path: /webhook/voice-gateway-action
+  timeout_seconds: 8
+  token_env: VOICE_WEBHOOK_TOKEN
+
+token_firewall:
+  max_input_chars: 600
+  max_followup_turns: 2
+  followup_window_seconds: 8
+  discard_single_words: true
+
+local_actions:
+  unsafe_admin_confirmation: CONFIRMO_REINICIAR_OPENCLAW
+
+music:
+  enabled: true
+  library_dir: /media/music
+  db_path: /logs/music_library.sqlite3
+  extensions:
+    - .mp3
+    - .flac
+    - .ogg
+    - .m4a
+    - .wav
+  auto_scan_on_start: true
+  fuzzy_threshold_artist: 0.62
+  fuzzy_threshold_album: 0.62
+  fuzzy_threshold_short: 0.90

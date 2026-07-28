@@ -1,0 +1,8 @@
+PyYAML==6.0.2
+requests==2.32.3
+websocket-client==1.8.0
+sounddevice==0.5.1
+numpy==2.2.1
+webrtcvad==2.0.10
+setuptools==80.9.0
+wyoming==1.8.0

@@ -1,0 +1,34 @@
+services:
+  voice-gateway:
+    image: local/voice-gateway:0.12
+    container_name: voice-gateway
+    command: ["python", "/app/voice_gateway.py", "--config", "/app/config.yaml", "--listen-loop", "--wake-provider", "stt"]
+    restart: unless-stopped
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - "12"
+    volumes:
+      - /opt/voice-ai/gateway/config.yaml:/app/config.yaml:ro
+      - /opt/voice-ai/logs:/logs
+    environment:
+      - VOICE_GATEWAY_CONFIG=/app/config.yaml
+      - PYTHONUNBUFFERED=1
+    networks:
+      - automation_internal
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "/app/voice_gateway.py", "--healthcheck-once"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+networks:
+  automation_internal:
+    external: true
+    name: automatizacion_automation-internal

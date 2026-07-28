@@ -1,0 +1,1441 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import asyncio
+import difflib
+import enum
+import json
+import logging
+import math
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import unicodedata
+import wave
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+import numpy as np
+import requests
+import webrtcvad
+import yaml
+from wyoming.asr import Transcribe, Transcript
+from wyoming.audio import AudioChunk, AudioStart, AudioStop
+from wyoming.client import AsyncClient
+from wyoming.event import async_read_event, async_write_event
+from wyoming.tts import Synthesize
+from wyoming.wake import Detect, Detection, NotDetected
+
+try:
+    import sounddevice as sd
+except Exception:  # pragma: no cover - host audio varies
+    sd = None
+
+try:
+    import websocket
+except Exception:  # pragma: no cover
+    websocket = None
+
+
+class State(str, enum.Enum):
+    BOOT = "BOOT"
+    HEALTHCHECK = "HEALTHCHECK"
+    PASSIVE_LISTENING = "PASSIVE_LISTENING"
+    WAKE_CONFIRMED = "WAKE_CONFIRMED"
+    RECORDING_USER = "RECORDING_USER"
+    TRANSCRIBING = "TRANSCRIBING"
+    TOKEN_FIREWALL = "TOKEN_FIREWALL"
+    LOCAL_ACTION = "LOCAL_ACTION"
+    N8N_ACTION = "N8N_ACTION"
+    OPENCLAW_REQUEST = "OPENCLAW_REQUEST"
+    SPEAKING = "SPEAKING"
+    FOLLOW_UP_WINDOW = "FOLLOW_UP_WINDOW"
+    ERROR_RECOVERY = "ERROR_RECOVERY"
+
+
+@dataclass
+class RouteDecision:
+    route: str
+    text: str
+    action: str | None = None
+    reason: str | None = None
+    requires_confirmation: bool = False
+    raw_text: str | None = None
+    normalized_text: str | None = None
+    matched_alias: str | None = None
+    fuzzy_score: float | None = None
+
+
+class CircuitBreaker:
+    def __init__(self, name: str, fail_threshold: int = 3, reset_seconds: int = 30):
+        self.name = name
+        self.fail_threshold = fail_threshold
+        self.reset_seconds = reset_seconds
+        self.failures = 0
+        self.opened_at: float | None = None
+
+    def allow(self) -> bool:
+        if self.opened_at is None:
+            return True
+        if time.time() - self.opened_at >= self.reset_seconds:
+            self.failures = 0
+            self.opened_at = None
+            return True
+        return False
+
+    def success(self) -> None:
+        self.failures = 0
+        self.opened_at = None
+
+    def failure(self) -> None:
+        self.failures += 1
+        if self.failures >= self.fail_threshold:
+            self.opened_at = time.time()
+
+
+def load_config(path: str) -> dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def setup_logging(config: dict[str, Any]) -> logging.Logger:
+    log_file = config.get("server", {}).get("log_file", "/logs/voice-gateway.log")
+    log_level = getattr(logging, str(config.get("server", {}).get("log_level", "INFO")).upper(), logging.INFO)
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("voice-gateway")
+    logger.setLevel(log_level)
+    logger.handlers.clear()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(formatter)
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(console)
+    logger.addHandler(file_handler)
+    return logger
+
+
+def parse_tcp_uri(uri: str) -> tuple[str, int]:
+    parsed = urlparse(uri)
+    if parsed.scheme not in {"tcp", "ws", "http", "https"}:
+        raise ValueError(f"unsupported uri scheme: {uri}")
+    if not parsed.hostname or not parsed.port:
+        raise ValueError(f"missing host or port in uri: {uri}")
+    return parsed.hostname, int(parsed.port)
+
+
+def tcp_check(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, "ok"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def ensure_audio_output_unmuted(logger: logging.Logger) -> None:
+    commands = [
+        ["amixer", "-c", "0", "sset", "Master", "unmute", "90%"],
+        ["amixer", "-c", "0", "sset", "Speaker", "unmute", "90%"],
+        ["amixer", "-c", "0", "sset", "Headphone", "unmute", "90%"],
+        ["amixer", "-c", "0", "sset", "PCM", "100%"],
+        ["amixer", "-c", "0", "sset", "Auto-Mute Mode", "Disabled"],
+    ]
+    for command in commands:
+        try:
+            result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                logger.info("audio control ok: %s", " ".join(command))
+            else:
+                logger.warning("audio control unavailable: %s: %s", " ".join(command), (result.stderr or result.stdout).strip())
+        except FileNotFoundError:
+            logger.warning("amixer not found; cannot unmute output")
+            return
+        except Exception as exc:
+            logger.warning("audio control failed: %s: %s", " ".join(command), exc)
+
+
+def wav_write(path: str, audio: np.ndarray, sample_rate: int) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    clipped = np.clip(audio, -1.0, 1.0)
+    pcm = (clipped * 32767.0).astype(np.int16)
+    with wave.open(path, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm.tobytes())
+
+
+def wav_write_int16(path: str, audio: np.ndarray, sample_rate: int, channels: int = 1) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    pcm = np.asarray(audio, dtype=np.int16)
+    with wave.open(path, "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm.tobytes())
+
+
+def wav_read(path: str) -> tuple[np.ndarray, int]:
+    with wave.open(path, "rb") as wav:
+        channels = wav.getnchannels()
+        sample_width = wav.getsampwidth()
+        sample_rate = wav.getframerate()
+        frames = wav.readframes(wav.getnframes())
+    if sample_width != 2:
+        raise ValueError(f"unsupported sample width: {sample_width}")
+    pcm = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    if channels > 1:
+        pcm = pcm.reshape(-1, channels).mean(axis=1)
+    return pcm, sample_rate
+
+
+def audio_level_stats(audio: np.ndarray) -> dict[str, float]:
+    arr = np.asarray(audio)
+    if arr.size == 0:
+        return {"peak": 0.0, "peak_percent": 0.0, "rms": 0.0}
+    if arr.dtype == np.int16:
+        values = arr.astype(np.float32) / 32768.0
+    else:
+        values = arr.astype(np.float32)
+    peak = float(np.max(np.abs(values))) if values.size else 0.0
+    rms = float(np.sqrt(np.mean(np.square(values)))) if values.size else 0.0
+    return {"peak": peak, "peak_percent": peak * 100.0, "rms": rms}
+
+
+def apply_audio_gain_int16(audio: np.ndarray, gain: float, max_peak: float = 0.85, logger: logging.Logger | None = None, label: str = "audio") -> np.ndarray:
+    arr = np.asarray(audio)
+    if arr.dtype == np.int16:
+        values = arr.astype(np.float32) / 32768.0
+    else:
+        values = arr.astype(np.float32)
+    before = audio_level_stats(values)
+    gain = max(0.0, float(gain))
+    boosted = values * gain
+    boosted_peak = float(np.max(np.abs(boosted))) if boosted.size else 0.0
+    if boosted_peak > max_peak > 0:
+        boosted *= max_peak / boosted_peak
+    boosted = np.clip(boosted, -1.0, 1.0)
+    after = audio_level_stats(boosted)
+    if logger is not None:
+        logger.info(
+            "%s gain=%.2f before_peak=%.4f before_rms=%.4f after_peak=%.4f after_rms=%.4f",
+            label,
+            gain,
+            before["peak"],
+            before["rms"],
+            after["peak"],
+            after["rms"],
+        )
+    return (boosted * 32767.0).astype(np.int16)
+
+
+def analyze_wav_file(path: str) -> dict[str, Any]:
+    with wave.open(path, "rb") as wav:
+        channels = wav.getnchannels()
+        sample_width = wav.getsampwidth()
+        sample_rate = wav.getframerate()
+        frames_count = wav.getnframes()
+        frames = wav.readframes(frames_count)
+    if sample_width != 2:
+        raise ValueError(f"unsupported sample width: {sample_width}")
+    pcm = np.frombuffer(frames, dtype=np.int16)
+    stats = audio_level_stats(pcm)
+    return {
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "duration": frames_count / float(sample_rate) if sample_rate else 0.0,
+        "peak": stats["peak"],
+        "peak_percent": stats["peak_percent"],
+        "rms": stats["rms"],
+    }
+
+
+def resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    if source_rate == target_rate or audio.size == 0:
+        return audio.astype(np.float32, copy=False)
+    duration = audio.size / float(source_rate)
+    source_times = np.linspace(0.0, duration, num=audio.size, endpoint=False)
+    target_size = max(1, int(round(duration * target_rate)))
+    target_times = np.linspace(0.0, duration, num=target_size, endpoint=False)
+    return np.interp(target_times, source_times, audio).astype(np.float32)
+
+
+def write_text_file(path: str, text: str) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(text or "", encoding="utf-8")
+
+
+def read_text_file(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+
+
+def normalize_text_for_intent(text: str) -> str:
+    normalized = (text or "").strip().lower()
+    normalized = "".join(
+        ch for ch in unicodedata.normalize("NFD", normalized)
+        if unicodedata.category(ch) != "Mn"
+    )
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    has_open_variant = re.search(r"\bopen\s+\w+\b|\bopencl\w*\b", normalized) is not None
+    replacements = {
+        "open clamp": "openclaw",
+        "open plan": "openclaw",
+        "open plum": "openclaw",
+        "open plume": "openclaw",
+        "open plun": "openclaw",
+        "open cloud": "openclaw",
+        "open claw": "openclaw",
+        "open clau": "openclaw",
+        "open clao": "openclaw",
+        "open close": "openclaw",
+        "openclao": "openclaw",
+        "openclau": "openclaw",
+        "esta en el": "estado",
+        "esta en la": "estado",
+        "estal": "estado",
+        "estadle": "estado",
+    }
+    for source, target in replacements.items():
+        normalized = re.sub(rf"\b{re.escape(source)}\b", target, normalized)
+    if has_open_variant:
+        normalized = re.sub(r"\bestamos\b", "estado", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+class HealthChecker:
+    def __init__(self, config: dict[str, Any], logger: logging.Logger):
+        self.config = config
+        self.logger = logger
+
+    def check_all(self) -> dict[str, dict[str, Any]]:
+        targets: dict[str, tuple[str, int]] = {}
+        for name, section in (("voice-piper", "tts"), ("voice-whisper", "stt"), ("voice-wakeword", "wakeword")):
+            uri = self.config.get(section, {}).get("uri")
+            if uri:
+                targets[name] = parse_tcp_uri(uri)
+        openclaw_url = self.config.get("openclaw", {}).get("url")
+        if openclaw_url:
+            targets["openclaw"] = parse_tcp_uri(openclaw_url)
+        n8n_base = self.config.get("n8n", {}).get("base_url")
+        if n8n_base:
+            targets["n8n"] = parse_tcp_uri(n8n_base)
+
+        results: dict[str, dict[str, Any]] = {}
+        for name, (host, port) in targets.items():
+            ok, error = tcp_check(host, port)
+            results[name] = {"host": host, "port": port, "ok": ok, "error": None if ok else error}
+        return results
+
+    def log_results(self) -> bool:
+        results = self.check_all()
+        all_ok = True
+        for name, result in results.items():
+            if result["ok"]:
+                self.logger.info("health %s %s:%s ok", name, result["host"], result["port"])
+            else:
+                all_ok = False
+                self.logger.warning("health %s %s:%s failed: %s", name, result["host"], result["port"], result["error"])
+        return all_ok
+
+
+class AudioDevices:
+    def __init__(self, config: dict[str, Any], logger: logging.Logger):
+        self.root_config = config
+        self.config = config.get("audio", {})
+        self.logger = logger
+
+    def list_devices(self) -> list[dict[str, Any]]:
+        if sd is None:
+            self.logger.warning("sounddevice is unavailable; cannot list audio devices through PortAudio")
+            return []
+        try:
+            devices = sd.query_devices()
+            normalized = []
+            for idx, dev in enumerate(devices):
+                normalized.append({
+                    "index": idx,
+                    "name": dev.get("name"),
+                    "max_input_channels": dev.get("max_input_channels"),
+                    "max_output_channels": dev.get("max_output_channels"),
+                    "default_samplerate": dev.get("default_samplerate"),
+                })
+            return normalized
+        except Exception as exc:
+            self.logger.warning("failed to list audio devices: %s", exc)
+            return []
+
+    def log_devices(self) -> None:
+        devices = self.list_devices()
+        if not devices:
+            self.logger.warning("no audio devices reported; check /dev/snd mount and audio group")
+            return
+        for dev in devices:
+            self.logger.info("audio device %s: %s input=%s output=%s rate=%s", dev["index"], dev["name"], dev["max_input_channels"], dev["max_output_channels"], dev["default_samplerate"])
+
+    def play_test_tone(self) -> None:
+        if sd is None:
+            raise RuntimeError("sounddevice is unavailable")
+        ensure_audio_output_unmuted(self.logger)
+        output_device = self.config.get("output_device")
+        output_rate = int(self.config.get("output_sample_rate", self.config.get("sample_rate", 48000)))
+        duration = 1.0
+        t = np.linspace(0.0, duration, int(output_rate * duration), endpoint=False)
+        tone = (0.20 * np.sin(2.0 * math.pi * 440.0 * t)).astype(np.float32)
+        self.logger.info("playing test tone device=%s rate=%s duration=%.2fs", output_device, output_rate, duration)
+        sd.play(tone, samplerate=output_rate, device=output_device, blocking=True)
+
+    def play_wav(self, path: str) -> None:
+        if sd is None:
+            raise RuntimeError("sounddevice is unavailable")
+        ensure_audio_output_unmuted(self.logger)
+        output_device = self.config.get("output_device")
+        output_rate = int(self.config.get("output_sample_rate", self.config.get("sample_rate", 48000)))
+        audio, original_rate = wav_read(path)
+        rendered = resample_audio(audio, original_rate, output_rate)
+        duration = rendered.size / float(output_rate)
+        self.logger.info("playing wav path=%s original_rate=%s output_rate=%s duration=%.2fs device=%s", path, original_rate, output_rate, duration, output_device)
+        sd.play(rendered.astype(np.float32), samplerate=output_rate, device=output_device, blocking=True)
+
+    def record_once(self) -> dict[str, Any]:
+        if sd is None:
+            raise RuntimeError("sounddevice is unavailable")
+        sample_rate = int(self.config.get("sample_rate", 16000))
+        channels = int(self.config.get("channels", 1))
+        frame_ms = int(self.config.get("frame_ms", 30))
+        input_device = self.config.get("input_device")
+        max_record_seconds = float(self.config.get("max_record_seconds", 12))
+        phrase_end_silence_ms = int(self.config.get("phrase_end_silence_ms", 900))
+        min_voice_ms = int(self.config.get("min_voice_ms", 450))
+        frame_samples = int(sample_rate * frame_ms / 1000)
+        vad_cfg = self.root_config.get("vad", {}) if isinstance(self.root_config.get("vad"), dict) else {}
+        aggressiveness = int(vad_cfg.get("aggressiveness", 2))
+        vad = webrtcvad.Vad(aggressiveness)
+        max_frames = int(max_record_seconds * 1000 / frame_ms)
+        end_silence_frames = max(1, int(phrase_end_silence_ms / frame_ms))
+        voiced_frames = 0
+        trailing_silence_frames = 0
+        started = False
+        all_frames: list[np.ndarray] = []
+        captured_frames: list[np.ndarray] = []
+        self.logger.info("record-once waiting input_device=%s rate=%s frame_ms=%s max_seconds=%s", input_device, sample_rate, frame_ms, max_record_seconds)
+        with sd.InputStream(device=input_device, samplerate=sample_rate, channels=channels, dtype="int16", blocksize=frame_samples) as stream:
+            for _ in range(max_frames):
+                frame, _overflowed = stream.read(frame_samples)
+                mono = frame[:, 0] if frame.ndim > 1 else frame
+                mono = np.asarray(mono, dtype=np.int16)
+                all_frames.append(mono.copy())
+                is_speech = vad.is_speech(mono.tobytes(), sample_rate)
+                if is_speech:
+                    started = True
+                    voiced_frames += 1
+                    trailing_silence_frames = 0
+                elif started:
+                    trailing_silence_frames += 1
+                if started:
+                    captured_frames.append(mono.copy())
+                if started and trailing_silence_frames >= end_silence_frames:
+                    break
+        total_frames = captured_frames if started else all_frames
+        audio_i16 = np.concatenate(total_frames) if total_frames else np.zeros(0, dtype=np.int16)
+        audio_f32 = audio_i16.astype(np.float32) / 32768.0
+        gain = min(float(self.config.get("input_gain", 1.0)), float(self.config.get("max_input_gain", 16.0)))
+        gained_i16 = apply_audio_gain_int16(audio_i16, gain, logger=self.logger, label="record-once diagnostic")
+        total_ms = int(audio_i16.size / sample_rate * 1000) if audio_i16.size else 0
+        voice_ms = voiced_frames * frame_ms
+        final_silence_ms = trailing_silence_frames * frame_ms
+        ok = started and voice_ms >= min_voice_ms
+        path = "/logs/last_utterance.wav" if ok else "/logs/last_discarded.wav"
+        wav_write(path, audio_f32, sample_rate)
+        if ok:
+            wav_write_int16("/logs/last_utterance_gain.wav", gained_i16, sample_rate, channels=1)
+        self.logger.info("record-once result ok=%s total_ms=%s voice_ms=%s final_silence_ms=%s path=%s", ok, total_ms, voice_ms, final_silence_ms, path)
+        if not ok:
+            self.logger.warning("record-once discarded: insufficient voice (%sms < %sms)", voice_ms, min_voice_ms)
+        return {"ok": ok, "path": path, "total_ms": total_ms, "voice_ms": voice_ms, "final_silence_ms": final_silence_ms}
+
+    def wake_debug_record(self) -> dict[str, Any]:
+        if sd is None:
+            raise RuntimeError("sounddevice is unavailable")
+        sample_rate = int(self.config.get("sample_rate", 16000))
+        channels = int(self.config.get("channels", 1))
+        input_device = self.config.get("input_device")
+        seconds = 10
+        gain = min(float(self.config.get("wake_input_gain", self.config.get("input_gain", 1.0))), float(self.config.get("max_input_gain", 16.0)))
+        frames = int(sample_rate * seconds)
+        self.logger.info("wake-debug-record input_device=%s rate=%s channels=%s seconds=%s gain=%.2f", input_device, sample_rate, channels, seconds, gain)
+        raw = sd.rec(frames, samplerate=sample_rate, channels=channels, dtype="int16", device=input_device)
+        sd.wait()
+        raw_i16 = np.asarray(raw, dtype=np.int16).reshape(-1)
+        gain_i16 = apply_audio_gain_int16(raw_i16, gain, logger=self.logger, label="wake-debug-record")
+        wav_write_int16("/logs/wake_debug_raw.wav", raw_i16, sample_rate, channels=channels)
+        wav_write_int16("/logs/wake_debug_gain.wav", gain_i16, sample_rate, channels=channels)
+        result = {
+            "ok": True,
+            "raw_path": "/logs/wake_debug_raw.wav",
+            "gain_path": "/logs/wake_debug_gain.wav",
+            "raw": audio_level_stats(raw_i16),
+            "gain": audio_level_stats(gain_i16),
+            "gain_value": gain,
+        }
+        self.logger.info("wake-debug-record result=%s", result)
+        return result
+
+    def record_wake_fallback_window(self, path: str, window_seconds: float, min_voice_ms: int) -> dict[str, Any]:
+        if sd is None:
+            raise RuntimeError("sounddevice is unavailable")
+        sample_rate = int(self.config.get("sample_rate", 16000))
+        channels = int(self.config.get("channels", 1))
+        frame_ms = int(self.config.get("frame_ms", 30))
+        input_device = self.config.get("input_device")
+        frame_samples = max(1, int(sample_rate * frame_ms / 1000))
+        vad_cfg = self.root_config.get("vad", {}) if isinstance(self.root_config.get("vad"), dict) else {}
+        vad = webrtcvad.Vad(int(vad_cfg.get("aggressiveness", 2)))
+        max_frames = max(1, int(window_seconds * 1000 / frame_ms))
+        voiced_frames = 0
+        frames_out: list[np.ndarray] = []
+        self.logger.info("wake-fallback record window input_device=%s rate=%s seconds=%.2f", input_device, sample_rate, window_seconds)
+        with sd.InputStream(device=input_device, samplerate=sample_rate, channels=channels, dtype="int16", blocksize=frame_samples) as stream:
+            for _ in range(max_frames):
+                frame, _overflowed = stream.read(frame_samples)
+                mono = frame[:, 0] if frame.ndim > 1 else frame
+                mono = np.asarray(mono, dtype=np.int16)
+                frames_out.append(mono.copy())
+                if vad.is_speech(mono.tobytes(), sample_rate):
+                    voiced_frames += 1
+        audio_i16 = np.concatenate(frames_out) if frames_out else np.zeros(0, dtype=np.int16)
+        wav_write_int16(path, audio_i16, sample_rate, channels=1)
+        voice_ms = voiced_frames * frame_ms
+        stats = audio_level_stats(audio_i16)
+        ok = voice_ms >= min_voice_ms
+        self.logger.info("wake-fallback recorded ok=%s voice_ms=%s path=%s peak=%.4f rms=%.4f", ok, voice_ms, path, stats["peak"], stats["rms"])
+        return {"ok": ok, "path": path, "voice_ms": voice_ms, "stats": stats}
+
+
+class TokenFirewall:
+    FILLERS = {"eh", "mmm", "mm", "ah", "ok", "si", "aja", "este"}
+    CANCEL_ALIASES = {
+        "cancelar", "cancela", "cancele", "cancel", "canselar", "cansela", "kanselar",
+        "yancelan", "pencilar", "cantele", "cantale", "salir", "terminar", "termina",
+        "para", "parale", "alto", "detente", "detener", "no importa", "olvidalo", "cerrar", "cierra",
+    }
+    SYSTEM_STATUS_WORDS = {"estado", "esto", "este", "esta", "estatus"}
+    OPENCLAW_STATUS_ALIASES = (
+        "estado de openclaw",
+        "estado de open cloud",
+        "estado de open claw",
+        "esta en el open clamp",
+        "estadle de la open plan",
+        "estamos de otro june",
+        "estal y ropa el pleno",
+        "estado openclaw",
+        "estatus de openclaw",
+        "como esta openclaw",
+        "revisar openclaw",
+        "verifica openclaw",
+    )
+    LOCAL_ACTIONS = {
+        "cancelar": "cancel",
+        "para": "stop",
+        "detente": "stop",
+        "repetir": "repeat",
+        "sube el volumen": "volume_up",
+        "baja el volumen": "volume_down",
+        "estaba en el sistema": "system_status",
+        "esto es del sistema": "system_status",
+        "esto del sistema": "system_status",
+        "este es del sistema": "system_status",
+        "esta es del sistema": "system_status",
+        "estoy del sistema": "system_status",
+        "estado del sistema": "system_status",
+        "estado sistema": "system_status",
+        "estatus del sistema": "system_status",
+        "estado del servidor": "system_status",
+        "estado servidor": "system_status",
+        "estado de openclaw": "openclaw_status",
+    }
+    ADMIN_RESTART = {"reinicia openclaw", "reiniciar openclaw"}
+    N8N_PATTERNS = {
+        "notifica discord": "discord_notify",
+        "estado administrativo de openclaw": "admin_openclaw_status",
+        "logs de openclaw": "admin_openclaw_logs",
+    }
+    COMPLEX_HINTS = ("explic", "analiza", "diagnost", "por qué", "porque", "error", "contenedor", "openclaw", "ayúdame", "ayudame", "revisa")
+
+    def __init__(self, config: dict[str, Any]):
+        self.config = config.get("token_firewall", {})
+        self.max_input_chars = int(self.config.get("max_input_chars", 600))
+        self.min_text_chars = 3
+
+    @staticmethod
+    def normalize(text: str) -> str:
+        return normalize_text_for_intent(text)
+
+    @staticmethod
+    def decision(route: str, raw_text: str, normalized_text: str, action: str | None = None, reason: str | None = None, requires_confirmation: bool = False, matched_alias: str | None = None, fuzzy_score: float | None = None) -> RouteDecision:
+        return RouteDecision(route, normalized_text, action=action, reason=reason, requires_confirmation=requires_confirmation, raw_text=raw_text, normalized_text=normalized_text, matched_alias=matched_alias, fuzzy_score=fuzzy_score)
+
+    def match_cancel_alias(self, text: str) -> tuple[str | None, float]:
+        if not text:
+            return None, 0.0
+        words = text.split()
+        best_alias = None
+        best_score = 0.0
+        for alias in self.CANCEL_ALIASES:
+            score = 1.0 if text == alias else difflib.SequenceMatcher(None, text, alias).ratio()
+            if score > best_score:
+                best_alias = alias
+                best_score = score
+        if len(words) <= 3 and best_score >= 0.62:
+            return best_alias, best_score
+        return None, best_score
+
+    def match_openclaw_status(self, text: str) -> str | None:
+        if "openclaw" in text:
+            if any(keyword in text for keyword in ("estado", "estatus", "revisar", "verifica", "sistema", "servidor")):
+                return "keyword_openclaw_status"
+        for alias in self.OPENCLAW_STATUS_ALIASES:
+            normalized_alias = self.normalize(alias)
+            if text == normalized_alias or difflib.SequenceMatcher(None, text, normalized_alias).ratio() >= 0.82:
+                return alias
+        return None
+
+    def classify(self, raw_text: str) -> RouteDecision:
+        text = self.normalize(raw_text)
+        if not text:
+            return self.decision("discard", raw_text, text, reason="empty_text")
+        if len(text) < self.min_text_chars:
+            return self.decision("discard", raw_text, text, reason="too_short")
+        if len(text) > self.max_input_chars:
+            return self.decision("discard", raw_text, text[: self.max_input_chars], reason="too_long")
+        words = text.split()
+        if self.config.get("discard_single_words", True) and len(words) == 1 and words[0] in self.FILLERS:
+            return self.decision("discard", raw_text, text, reason="filler_single_word")
+        if text in self.FILLERS:
+            return self.decision("discard", raw_text, text, reason="filler")
+        cancel_alias, cancel_score = self.match_cancel_alias(text)
+        if cancel_alias:
+            reason = "cancel_alias" if cancel_score >= 1.0 else "cancel_fuzzy_alias"
+            return self.decision("local", raw_text, text, action="cancel", reason=reason, matched_alias=cancel_alias, fuzzy_score=cancel_score)
+        if "sistema" in words and any(word in self.SYSTEM_STATUS_WORDS for word in words):
+            return self.decision("local", raw_text, text, action="system_status", reason="system_status_keyword", matched_alias="sistema")
+        status_alias = self.match_openclaw_status(text)
+        if status_alias:
+            return self.decision("local", raw_text, text, action="openclaw_status", reason="openclaw_status_alias", matched_alias=status_alias)
+        for phrase, action in self.LOCAL_ACTIONS.items():
+            if text == phrase or text.startswith(phrase + " "):
+                return self.decision("local", raw_text, text, action=action, reason="local_command", matched_alias=phrase)
+        if text in self.ADMIN_RESTART:
+            return self.decision("n8n", raw_text, text, action="admin_restart_openclaw", reason="admin_requires_confirmation", requires_confirmation=True, matched_alias=text)
+        if "confirma reiniciar openclaw" in text or "confirmo reiniciar openclaw" in text:
+            return self.decision("n8n", raw_text, text, action="admin_restart_openclaw", reason="admin_confirmation_attempt", requires_confirmation=True)
+        for phrase, action in self.N8N_PATTERNS.items():
+            if phrase in text:
+                return self.decision("n8n", raw_text, text, action=action, reason="n8n_action", matched_alias=phrase)
+        if any(hint in text for hint in self.COMPLEX_HINTS) or len(words) >= 4:
+            return self.decision("openclaw", raw_text, text, reason="complex_query")
+        return self.decision("discard", raw_text, text, reason="low_value_short_text")
+
+
+class LocalActions:
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self.last_response: str | None = None
+
+    def run(self, action: str, text: str) -> dict[str, Any]:
+        self.logger.info("local action=%s text=%r", action, text)
+        if action in {"cancel", "stop"}:
+            return {"ok": True, "speak": "Cancelado."}
+        if action == "repeat":
+            return {"ok": True, "speak": self.last_response or "No tengo una respuesta anterior para repetir."}
+        if action in {"volume_up", "volume_down"}:
+            return {"ok": True, "speak": "Control de volumen pendiente de conectar al mezclador ALSA."}
+        if action == "openclaw_status":
+            return {"ok": True, "speak": "Estado local disponible en logs; consulta administrativa preparada."}
+        if action == "system_status":
+            return {"ok": True, "speak": "El gateway de voz está activo. OpenClaw está accesible."}
+        return {"ok": False, "speak": "Acción local no reconocida."}
+
+
+class N8NClient:
+    def __init__(self, config: dict[str, Any], logger: logging.Logger):
+        self.config = config.get("n8n", {})
+        self.logger = logger
+        self.breaker = CircuitBreaker("n8n")
+
+    def call(self, action: str, text: str, confirmation: str | None = None) -> dict[str, Any]:
+        if not self.config.get("enabled", True):
+            return {"ok": False, "error": "n8n disabled"}
+        if not self.breaker.allow():
+            return {"ok": False, "error": "n8n circuit breaker open"}
+        base = str(self.config.get("base_url", "")).rstrip("/")
+        path = self.config.get("voice_webhook_path", "/webhook/voice-gateway-action")
+        token = os.environ.get(self.config.get("token_env", "VOICE_WEBHOOK_TOKEN"), "")
+        url = base + path
+        try:
+            response = requests.post(
+                url,
+                headers={"x-voice-token": token} if token else {},
+                json={"action": action, "text": text, "confirmation": confirmation},
+                timeout=float(self.config.get("timeout_seconds", 8)),
+            )
+            response.raise_for_status()
+            self.breaker.success()
+            return response.json()
+        except Exception as exc:
+            self.breaker.failure()
+            self.logger.warning("n8n action failed action=%s error=%s", action, exc)
+            return {"ok": False, "error": str(exc)}
+
+
+class OpenClawClient:
+    def __init__(self, config: dict[str, Any], logger: logging.Logger):
+        self.config = config.get("openclaw", {})
+        self.logger = logger
+        self.breaker = CircuitBreaker("openclaw")
+
+    def send_text(self, text: str) -> dict[str, Any]:
+        if not self.config.get("enabled", True):
+            return {"ok": False, "error": "openclaw disabled"}
+        if not self.breaker.allow():
+            return {"ok": False, "error": "openclaw circuit breaker open"}
+        if websocket is None:
+            return {"ok": False, "error": "websocket-client unavailable"}
+        rpc_method = self.config.get("rpc_method")
+        if not rpc_method:
+            self.logger.error("OpenClaw RPC method not configured; refusing to send prompt")
+            return {"ok": False, "error": "openclaw rpc_method not configured; text not sent"}
+        url = self.config.get("url", "ws://openclaw:18789")
+        timeout = float(self.config.get("timeout_seconds", 35))
+        payload = {"method": rpc_method, "params": {"agentId": self.config.get("agent_default", "main"), "message": text}}
+        try:
+            ws = websocket.create_connection(url, timeout=timeout)
+            ws.send(json.dumps(payload))
+            raw = ws.recv()
+            ws.close()
+            self.breaker.success()
+            return {"ok": True, "raw": raw}
+        except Exception as exc:
+            self.breaker.failure()
+            self.logger.warning("openclaw request failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+
+class WakeWordClient:
+    def __init__(self, config: dict[str, Any], logger: logging.Logger):
+        self.root_config = config
+        self.config = config.get("wakeword", {})
+        self.audio_config = config.get("audio", {})
+        self.logger = logger
+
+    def wait_for_wake(self, timeout: float | None = None, debug: bool = False) -> bool:
+        if not self.config.get("enabled", True):
+            self.logger.info("wakeword disabled")
+            return False
+        if self.config.get("provider", "wyoming") != "wyoming":
+            self.logger.warning("WakeWord adapter not fully implemented: unsupported provider=%s", self.config.get("provider"))
+            return False
+        if sd is None:
+            self.logger.warning("wakeword unavailable: sounddevice is unavailable")
+            return False
+        try:
+            return asyncio.run(self._wait_for_wake(timeout, debug=debug))
+        except Exception as exc:
+            self.logger.warning("wakeword failed: %s", exc)
+            return False
+
+    async def _wait_for_wake(self, timeout: float | None = None, debug: bool = False) -> bool:
+        uri = self.config.get("uri", "tcp://voice-wakeword:10400")
+        configured_timeout = float(self.config.get("timeout_seconds", 30))
+        wait_timeout = configured_timeout if timeout is None else float(timeout)
+        name = str(self.config.get("name", "hey_jarvis") or "").strip()
+        names = [name] if name else None
+        client = AsyncClient.from_uri(uri)
+        if debug:
+            self.logger.info("wake-debug connecting uri=%s", uri)
+        await asyncio.wait_for(client.connect(), timeout=min(wait_timeout, configured_timeout))
+        try:
+            self.logger.info("wakeword listening uri=%s name=%s timeout=%ss", uri, name or "any", wait_timeout)
+            await client.write_event(Detect(names=names).event())
+            if debug:
+                self.logger.info("wake-debug Detect sent names=%s", names)
+            stop_event = asyncio.Event()
+            detector = asyncio.create_task(self._read_detection(client, name, stop_event, debug=debug))
+            streamer = asyncio.create_task(self._stream_microphone(client, wait_timeout, stop_event, debug=debug))
+            done, pending = await asyncio.wait({detector, streamer}, timeout=wait_timeout + 1.0, return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                stop_event.set()
+                for task in pending:
+                    task.cancel()
+                self.logger.info("wakeword timeout")
+                if debug:
+                    self.logger.info("wake-debug timeout")
+                return False
+            result = False
+            for task in done:
+                result = bool(task.result())
+            stop_event.set()
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            return result
+        finally:
+            await client.disconnect()
+            if debug:
+                self.logger.info("wake-debug disconnected")
+
+    async def _read_detection(self, client: AsyncClient, expected_name: str, stop_event: asyncio.Event, debug: bool = False) -> bool:
+        while not stop_event.is_set():
+            event = await client.read_event()
+            if event is None:
+                if debug:
+                    self.logger.info("wake-debug event=None")
+                return False
+            if debug:
+                self.logger.info("wake-debug event type=%s data=%s", event.type, event.data)
+            if Detection.is_type(event.type):
+                detection = Detection.from_event(event)
+                detected_name = detection.name or ""
+                self.logger.info("wakeword detection name=%s", detected_name or "unknown")
+                if not expected_name or detected_name == expected_name:
+                    return True
+            if NotDetected.is_type(event.type):
+                self.logger.info("wakeword not detected")
+                return False
+        return False
+
+    async def _stream_microphone(self, client: AsyncClient, timeout: float, stop_event: asyncio.Event, debug: bool = False) -> bool:
+        sample_rate = int(self.audio_config.get("sample_rate", 16000))
+        channels = int(self.audio_config.get("channels", 1))
+        frame_ms = int(self.audio_config.get("frame_ms", 30))
+        input_device = self.audio_config.get("input_device")
+        gain = min(float(self.audio_config.get("wake_input_gain", self.audio_config.get("input_gain", 1.0))), float(self.audio_config.get("max_input_gain", 16.0)))
+        frame_samples = max(1, int(sample_rate * frame_ms / 1000))
+        queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=8)
+        loop = asyncio.get_running_loop()
+        chunks_sent = 0
+        sec_started = time.monotonic()
+        raw_peaks: list[float] = []
+        raw_rms: list[float] = []
+        gain_peaks: list[float] = []
+        gain_rms: list[float] = []
+
+        def enqueue_audio(indata: bytes, _frames: int, _time_info: Any, status: Any) -> None:
+            if status:
+                self.logger.debug("wakeword audio status=%s", status)
+            data = bytes(indata)
+            def put_nowait() -> None:
+                if queue.full():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                queue.put_nowait(data)
+            loop.call_soon_threadsafe(put_nowait)
+
+        await client.write_event(AudioStart(rate=sample_rate, width=2, channels=channels).event())
+        if debug:
+            self.logger.info("wake-debug AudioStart sent rate=%s width=2 channels=%s gain=%.2f", sample_rate, channels, gain)
+        deadline = time.monotonic() + timeout
+        try:
+            with sd.RawInputStream(device=input_device, samplerate=sample_rate, channels=channels, dtype="int16", blocksize=frame_samples, callback=enqueue_audio):
+                while not stop_event.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self.logger.info("wakeword timeout")
+                        return False
+                    try:
+                        chunk = await asyncio.wait_for(queue.get(), timeout=min(0.25, remaining))
+                    except asyncio.TimeoutError:
+                        continue
+                    raw_i16 = np.frombuffer(chunk, dtype=np.int16)
+                    gained_i16 = apply_audio_gain_int16(raw_i16, gain)
+                    raw_stats = audio_level_stats(raw_i16)
+                    gain_stats = audio_level_stats(gained_i16)
+                    raw_peaks.append(raw_stats["peak"])
+                    raw_rms.append(raw_stats["rms"])
+                    gain_peaks.append(gain_stats["peak"])
+                    gain_rms.append(gain_stats["rms"])
+                    await client.write_event(AudioChunk(rate=sample_rate, width=2, channels=channels, audio=gained_i16.tobytes()).event())
+                    chunks_sent += 1
+                    if time.monotonic() - sec_started >= 1.0:
+                        avg_raw_peak = float(np.mean(raw_peaks)) if raw_peaks else 0.0
+                        avg_raw_rms = float(np.mean(raw_rms)) if raw_rms else 0.0
+                        avg_gain_peak = float(np.mean(gain_peaks)) if gain_peaks else 0.0
+                        avg_gain_rms = float(np.mean(gain_rms)) if gain_rms else 0.0
+                        self.logger.info(
+                            "wake audio chunks=%s raw_peak=%.4f raw_rms=%.4f gain_peak=%.4f gain_rms=%.4f gain=%.2f",
+                            chunks_sent,
+                            avg_raw_peak,
+                            avg_raw_rms,
+                            avg_gain_peak,
+                            avg_gain_rms,
+                            gain,
+                        )
+                        if avg_gain_rms < 0.01:
+                            self.logger.warning("wake audio level is still very low after gain: rms=%.4f", avg_gain_rms)
+                        raw_peaks.clear()
+                        raw_rms.clear()
+                        gain_peaks.clear()
+                        gain_rms.clear()
+                        sec_started = time.monotonic()
+        finally:
+            try:
+                await client.write_event(AudioStop().event())
+                if debug:
+                    self.logger.info("wake-debug AudioStop sent chunks=%s", chunks_sent)
+            except Exception as exc:
+                self.logger.debug("wakeword audio stop failed: %s", exc)
+        return False
+
+
+class WyomingAdapter:
+    def __init__(self, name: str, uri: str, logger: logging.Logger):
+        self.name = name
+        self.uri = uri
+        self.logger = logger
+
+    def ensure_available(self) -> bool:
+        host, port = parse_tcp_uri(self.uri)
+        ok, error = tcp_check(host, port)
+        if not ok:
+            self.logger.warning("%s unavailable at %s: %s", self.name, self.uri, error)
+        return ok
+
+    def transcribe(self, _audio_bytes: bytes) -> str:
+        raise NotImplementedError("Wyoming STT frame protocol adapter is intentionally stubbed until audio loop integration phase")
+
+    def speak(self, text: str) -> None:
+        self.logger.info("TTS adapter placeholder would synthesize %d chars", len(text))
+        raise NotImplementedError("Wyoming TTS frame protocol adapter is intentionally stubbed until audio loop integration phase")
+
+
+class STTClient:
+    def __init__(self, config: dict[str, Any], logger: logging.Logger):
+        self.root_config = config
+        self.config = config.get("stt", {})
+        self.audio_config = config.get("audio", {})
+        self.logger = logger
+
+    def transcribe_wav(self, path: str) -> str:
+        start = time.monotonic()
+        try:
+            text = asyncio.run(self._transcribe_wav(path))
+            latency_ms = int((time.monotonic() - start) * 1000)
+            self.logger.info("stt result chars=%s latency_ms=%s path=%s", len(text), latency_ms, path)
+            return text.strip()
+        except Exception as exc:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            self.logger.warning("stt failed latency_ms=%s path=%s error=%s", latency_ms, path, exc)
+            return ""
+
+    async def _transcribe_wav(self, path: str) -> str:
+        uri = self.config.get("uri", "tcp://voice-whisper:10300")
+        host, port = parse_tcp_uri(uri)
+        timeout = float(self.config.get("timeout_seconds", 12))
+        language = self.config.get("language", "es")
+        with wave.open(path, "rb") as wav:
+            rate = wav.getframerate()
+            width = wav.getsampwidth()
+            channels = wav.getnchannels()
+            data = wav.readframes(wav.getnframes())
+        if self.config.get("pre_gain_enabled", False):
+            gain = min(float(self.audio_config.get("stt_input_gain", self.audio_config.get("input_gain", 1.0))), float(self.audio_config.get("max_input_gain", 16.0)))
+            pcm = np.frombuffer(data, dtype=np.int16)
+            data = apply_audio_gain_int16(pcm, gain, logger=self.logger, label="stt pre-gain").tobytes()
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+        try:
+            await async_write_event(Transcribe(language=language).event(), writer)
+            await async_write_event(AudioStart(rate=rate, width=width, channels=channels).event(), writer)
+            chunk_bytes = max(width * channels, rate * width * channels // 10)
+            for offset in range(0, len(data), chunk_bytes):
+                await async_write_event(AudioChunk(rate=rate, width=width, channels=channels, audio=data[offset:offset + chunk_bytes]).event(), writer)
+            await async_write_event(AudioStop().event(), writer)
+            while True:
+                event = await asyncio.wait_for(async_read_event(reader), timeout=timeout)
+                if event is None:
+                    return ""
+                if Transcript.is_type(event.type):
+                    return Transcript.from_event(event).text or ""
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
+class TTSClient:
+    def __init__(self, config: dict[str, Any], logger: logging.Logger):
+        self.config = config.get("tts", {})
+        self.logger = logger
+
+    def synthesize_to_wav(self, text: str, out_path: str) -> str:
+        start = time.monotonic()
+        try:
+            result = asyncio.run(self._synthesize_to_wav(text, out_path))
+            latency_ms = int((time.monotonic() - start) * 1000)
+            self.logger.info("tts result chars=%s latency_ms=%s path=%s", len(text), latency_ms, result)
+            return result
+        except Exception as exc:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            self.logger.warning("tts failed latency_ms=%s error=%s", latency_ms, exc)
+            raise
+
+    async def _synthesize_to_wav(self, text: str, out_path: str) -> str:
+        clean = (text or "").strip()
+        if not clean:
+            raise ValueError("empty TTS text")
+        max_chars = int(self.config.get("max_chars", 700))
+        clean = clean[:max_chars]
+        uri = self.config.get("uri", "tcp://voice-piper:10200")
+        host, port = parse_tcp_uri(uri)
+        timeout = float(self.config.get("timeout_seconds", 10))
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+        chunks: list[bytes] = []
+        rate = 22050
+        width = 2
+        channels = 1
+        try:
+            await async_write_event(Synthesize(text=clean).event(), writer)
+            while True:
+                event = await asyncio.wait_for(async_read_event(reader), timeout=timeout)
+                if event is None:
+                    break
+                if AudioStart.is_type(event.type):
+                    audio_start = AudioStart.from_event(event)
+                    rate = audio_start.rate
+                    width = audio_start.width
+                    channels = audio_start.channels
+                elif AudioChunk.is_type(event.type):
+                    chunks.append(AudioChunk.from_event(event).audio)
+                elif AudioStop.is_type(event.type):
+                    break
+        finally:
+            writer.close()
+            await writer.wait_closed()
+        if not chunks:
+            raise RuntimeError("TTS returned no audio")
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(out_path, "wb") as wav:
+            wav.setnchannels(channels)
+            wav.setsampwidth(width)
+            wav.setframerate(rate)
+            wav.writeframes(b"".join(chunks))
+        return out_path
+
+
+class VoiceGateway:
+    def __init__(self, config: dict[str, Any], logger: logging.Logger):
+        self.config = config
+        self.logger = logger
+        self.state = State.BOOT
+        self.health = HealthChecker(config, logger)
+        self.audio = AudioDevices(config, logger)
+        self.firewall = TokenFirewall(config)
+        self.local = LocalActions(logger)
+        self.n8n = N8NClient(config, logger)
+        self.openclaw = OpenClawClient(config, logger)
+        self.stt = STTClient(config, logger)
+        self.tts = TTSClient(config, logger)
+        self.wakeword = WakeWordClient(config, logger)
+        self.followup_turns = 0
+
+    @property
+    def conversation_config(self) -> dict[str, Any]:
+        return self.config.get("conversation", {}) if isinstance(self.config.get("conversation"), dict) else {}
+
+    def wake_ack_text(self) -> str:
+        return str(self.conversation_config.get("wake_ack_text", "Te escucho."))
+
+    def unknown_text(self) -> str:
+        return str(self.conversation_config.get("unknown_text", "No entendí, repite por favor."))
+
+    def detect_wake(self, provider: str = "wyoming") -> bool:
+        provider = (provider or "wyoming").strip().lower()
+        self.logger.info("wake provider=%s", provider)
+        if provider == "wyoming":
+            return self.wakeword.wait_for_wake()
+        if provider == "stt":
+            return self.wait_for_wake_stt_fallback()
+        if provider == "auto":
+            if self.wakeword.wait_for_wake():
+                return True
+            self.logger.info("wake provider=auto wyoming timeout; trying stt fallback")
+            return self.wait_for_wake_stt_fallback()
+        self.logger.warning("unknown wake provider=%s; using wyoming", provider)
+        return self.wakeword.wait_for_wake()
+
+    def wait_for_wake_stt_fallback(self) -> bool:
+        wake_config = self.config.get("wakeword", {}) if isinstance(self.config.get("wakeword"), dict) else {}
+        if not wake_config.get("fallback_stt_enabled", False):
+            self.logger.info("wake fallback stt disabled")
+            return False
+        timeout = float(wake_config.get("fallback_stt_timeout_seconds", 30))
+        window_seconds = float(wake_config.get("fallback_stt_window_seconds", 3))
+        min_voice_ms = int(wake_config.get("fallback_stt_min_voice_ms", 500))
+        phrases = [TokenFirewall.normalize(str(item)) for item in wake_config.get("fallback_stt_phrases", [])]
+        if not phrases:
+            phrases = ["hey jarvis", "jarvis", "oye jarvis", "asistente", "oye asistente"]
+        deadline = time.monotonic() + timeout
+        attempt = 0
+        path = "/logs/wake_fallback_utterance.wav"
+        self.logger.info("wake provider=stt timeout=%.1fs window=%.1fs phrases=%s", timeout, window_seconds, phrases)
+        while time.monotonic() < deadline:
+            attempt += 1
+            record = self.audio.record_wake_fallback_window(path, window_seconds, min_voice_ms)
+            if not record.get("ok"):
+                self.logger.info("wake fallback attempt=%s no_voice path=%s", attempt, path)
+                continue
+            text = self.stt.transcribe_wav(path)
+            normalized = TokenFirewall.normalize(text)
+            if self.is_likely_tts_loop(normalized):
+                self.logger.warning("wake fallback discarded possible_tts_echo text=%r", text)
+                continue
+            matched, score = self.match_wake_phrase(normalized, phrases)
+            self.logger.info(
+                "wake fallback attempt=%s path=%s text=%r normalized_text=%r matched=%r score=%.3f",
+                attempt,
+                path,
+                text,
+                normalized,
+                matched,
+                score,
+            )
+            if matched:
+                self.logger.info("wake fallback detected phrase=%s score=%.3f", matched, score)
+                return True
+        self.logger.info("wake fallback timeout")
+        return False
+
+    @staticmethod
+    def match_wake_phrase(text: str, phrases: list[str]) -> tuple[str | None, float]:
+        if not text:
+            return None, 0.0
+        best_phrase = None
+        best_score = 0.0
+        for phrase in phrases:
+            if not phrase:
+                continue
+            score = 1.0 if phrase in text else difflib.SequenceMatcher(None, text, phrase).ratio()
+            if score > best_score:
+                best_phrase = phrase
+                best_score = score
+        return (best_phrase, best_score) if best_score >= 0.72 else (None, best_score)
+
+    def transition(self, state: State) -> None:
+        self.logger.info("state %s -> %s", self.state, state)
+        self.state = state
+
+    def boot(self) -> None:
+        ensure_audio_output_unmuted(self.logger)
+        self.transition(State.HEALTHCHECK)
+        self.health.log_results()
+        self.audio.log_devices()
+        self.transition(State.PASSIVE_LISTENING)
+
+    def process_text(self, raw_text: str, confirmation: str | None = None) -> dict[str, Any]:
+        self.transition(State.TOKEN_FIREWALL)
+        decision = self.firewall.classify(raw_text)
+        self.log_firewall_decision(decision)
+        return self.handle_decision(decision, speak=False, confirmation=confirmation)
+
+    def log_firewall_decision(self, decision: RouteDecision) -> None:
+        self.logger.info(
+            "firewall raw_text=%r normalized_text=%r route=%s action=%s reason=%s matched_alias=%s fuzzy_score=%s",
+            decision.raw_text,
+            decision.normalized_text,
+            decision.route,
+            decision.action,
+            decision.reason,
+            decision.matched_alias,
+            decision.fuzzy_score,
+        )
+
+    def handle_decision(self, decision: RouteDecision, speak: bool = False, confirmation: str | None = None) -> dict[str, Any]:
+        if decision.route == "discard":
+            self.logger.info("route discard reason=%s", decision.reason)
+            return {"ok": True, "discarded": True, "reason": decision.reason}
+        if decision.route == "local":
+            self.transition(State.LOCAL_ACTION)
+            if decision.action in {"openclaw_status", "system_status"}:
+                ok = self.health.check_all().get("openclaw", {}).get("ok") is True
+                if decision.action == "openclaw_status":
+                    result = {"ok": ok, "speak": "OpenClaw está accesible." if ok else "OpenClaw no está accesible."}
+                else:
+                    result = {"ok": True, "speak": "El gateway de voz está activo. OpenClaw está accesible." if ok else "El gateway de voz está activo. OpenClaw no está accesible."}
+            else:
+                result = self.local.run(decision.action or "unknown", decision.text)
+            if speak and result.get("speak"):
+                self.speak_text(str(result["speak"]))
+            return result
+        if decision.route == "n8n":
+            self.transition(State.N8N_ACTION)
+            result = self.n8n.call(decision.action or "unknown", decision.text, confirmation=confirmation)
+            if speak:
+                self.speak_text("Acción enviada a n8n." if result.get("ok") else "No pude contactar n8n.")
+            return result
+        if decision.route == "openclaw":
+            self.transition(State.OPENCLAW_REQUEST)
+            result = self.openclaw.send_text(decision.text)
+            if speak:
+                if result.get("ok"):
+                    self.speak_text("OpenClaw recibió la solicitud.")
+                elif "rpc_method" in str(result.get("error", "")):
+                    self.speak_text("OpenClaw todavía no tiene método RPC configurado.")
+                else:
+                    self.speak_text("No pude contactar OpenClaw.")
+            return result
+        return {"ok": False, "error": "unknown route"}
+
+    def speak_text(self, text: str) -> None:
+        clean = (text or "").strip()
+        if not clean:
+            return
+        self.transition(State.SPEAKING)
+        out_path = "/logs/last_tts.wav"
+        self.tts.synthesize_to_wav(clean, out_path)
+        write_text_file("/logs/last_assistant_text.txt", clean)
+        self.local.last_response = clean
+        self.audio.play_wav(out_path)
+        cooldown_ms = int(self.config.get("audio", {}).get("post_tts_mic_cooldown_ms", 700))
+        if cooldown_ms > 0:
+            self.logger.info("post-tts cooldown ms=%s", cooldown_ms)
+            time.sleep(cooldown_ms / 1000.0)
+
+    def is_likely_tts_loop(self, text: str) -> bool:
+        last_spoken = read_text_file("/logs/last_assistant_text.txt")
+        if not text or not last_spoken:
+            return False
+        ratio = difflib.SequenceMatcher(None, TokenFirewall.normalize(text), TokenFirewall.normalize(last_spoken)).ratio()
+        if ratio >= 0.86:
+            self.logger.warning("discarding possible TTS loop similarity=%.3f text=%r", ratio, text)
+            return True
+        return False
+
+    def voice_turn_once(self, text: str | None = None, confirmation: str | None = None, speak_unknown: bool = True) -> dict[str, Any]:
+        if text is None:
+            self.transition(State.RECORDING_USER)
+            record_result = self.audio.record_once()
+            if not record_result.get("ok"):
+                self.transition(State.TOKEN_FIREWALL)
+                self.logger.info("voice-turn discarded before STT: %s", record_result)
+                return {"ok": True, "route": "discard", "reason": "silence", "recording": record_result}
+            self.transition(State.TRANSCRIBING)
+            text = self.stt.transcribe_wav(str(record_result["path"]))
+            if not text:
+                self.logger.info("voice-turn discarded: empty STT")
+                if speak_unknown:
+                    self.speak_text(self.unknown_text())
+                return {"ok": True, "route": "discard", "reason": "empty_stt", "recording": record_result}
+        else:
+            record_result = None
+        write_text_file("/logs/last_user_text.txt", text)
+        if self.is_likely_tts_loop(text):
+            return {"ok": True, "route": "discard", "reason": "possible_tts_echo", "text": text, "recording": record_result}
+        self.transition(State.TOKEN_FIREWALL)
+        decision = self.firewall.classify(text)
+        self.log_firewall_decision(decision)
+        result = self.handle_decision(decision, speak=True, confirmation=confirmation)
+        result.update({"route": decision.route, "text": decision.text})
+        if decision.reason == "low_value_short_text" and speak_unknown:
+            self.speak_text(self.unknown_text())
+        if record_result is not None:
+            result["recording"] = record_result
+        return result
+
+    def wake_once(self, simulate_wake: bool = False, wake_provider: str = "wyoming") -> dict[str, Any]:
+        self.transition(State.PASSIVE_LISTENING)
+        detected = True if simulate_wake else self.detect_wake(wake_provider)
+        if not detected:
+            result = {"ok": True, "wake": False, "timeout": True}
+            print(json.dumps(result, ensure_ascii=False))
+            return result
+        self.transition(State.WAKE_CONFIRMED)
+        self.speak_text(self.wake_ack_text())
+        result = self.voice_turn_once()
+        result.update({"wake": True})
+        print(json.dumps(result, ensure_ascii=False))
+        return result
+
+    def listen_loop(self, simulate_wake: bool = False, wake_provider: str = "wyoming") -> None:
+        conversation = self.conversation_config
+        followup_window_seconds = float(conversation.get("followup_window_seconds", 8))
+        max_followup_turns = int(conversation.get("max_followup_turns", 2))
+        self.boot()
+        try:
+            while True:
+                self.transition(State.PASSIVE_LISTENING)
+                detected = True if simulate_wake else self.detect_wake(wake_provider)
+                if not detected:
+                    if simulate_wake:
+                        return
+                    continue
+                self.transition(State.WAKE_CONFIRMED)
+                self.speak_text(self.wake_ack_text())
+                first_result = self.voice_turn_once()
+                print(json.dumps(first_result, ensure_ascii=False))
+                if self.should_close_followup(first_result):
+                    if simulate_wake:
+                        return
+                    continue
+                self.transition(State.FOLLOW_UP_WINDOW)
+                self.followup_turns = 0
+                while self.followup_turns < max_followup_turns:
+                    started = time.monotonic()
+                    result = self.voice_turn_once(speak_unknown=True)
+                    print(json.dumps(result, ensure_ascii=False))
+                    self.followup_turns += 1
+                    if self.should_close_followup(result):
+                        break
+                    if time.monotonic() - started >= followup_window_seconds:
+                        break
+                if simulate_wake:
+                    return
+        except KeyboardInterrupt:
+            self.logger.info("listen-loop interrupted")
+
+    def should_close_followup(self, result: dict[str, Any]) -> bool:
+        if result.get("reason") in {"silence", "empty_stt", "possible_tts_echo"}:
+            return True
+        text = TokenFirewall.normalize(str(result.get("text", "")))
+        if result.get("route") == "local" and result.get("text") and result.get("speak") == "Cancelado.":
+            return True
+        if self.firewall.match_cancel_alias(text)[0]:
+            return True
+        if result.get("route") == "local" and text in self.firewall.CANCEL_ALIASES:
+            return True
+        return False
+
+    def run(self) -> None:
+        self.boot()
+        self.logger.info("voice gateway base loop is ready; full audio capture/wake/STT/TTS loop is adapter phase")
+        while True:
+            time.sleep(60)
+            self.transition(State.HEALTHCHECK)
+            self.health.log_results()
+            self.transition(State.PASSIVE_LISTENING)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=os.environ.get("VOICE_GATEWAY_CONFIG", "/app/config.yaml"))
+    parser.add_argument("--healthcheck-once", action="store_true")
+    parser.add_argument("--list-audio", action="store_true")
+    parser.add_argument("--play-test-tone", action="store_true")
+    parser.add_argument("--record-once", action="store_true")
+    parser.add_argument("--play-wav")
+    parser.add_argument("--analyze-wav")
+    parser.add_argument("--wake-debug-record", action="store_true")
+    parser.add_argument("--wake-debug-stream", action="store_true")
+    parser.add_argument("--stt-once")
+    parser.add_argument("--tts-once")
+    parser.add_argument("--voice-turn-once", action="store_true")
+    parser.add_argument("--wake-once", action="store_true")
+    parser.add_argument("--listen-loop", action="store_true")
+    parser.add_argument("--simulate-wake", action="store_true")
+    parser.add_argument("--wake-provider", choices=("wyoming", "stt", "auto"), default="wyoming")
+    parser.add_argument("--self-test-firewall", action="store_true")
+    parser.add_argument("--process-text")
+    parser.add_argument("--text")
+    parser.add_argument("--confirmation")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    logger = setup_logging(config)
+    gateway = VoiceGateway(config, logger)
+
+    if args.healthcheck_once:
+        return 0 if gateway.health.log_results() else 1
+    if args.list_audio:
+        gateway.audio.log_devices()
+        return 0
+    if args.play_test_tone:
+        gateway.audio.play_test_tone()
+        return 0
+    if args.record_once:
+        result = gateway.audio.record_once()
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result.get("ok") else 2
+    if args.play_wav:
+        gateway.audio.play_wav(args.play_wav)
+        return 0
+    if args.analyze_wav:
+        print(json.dumps(analyze_wav_file(args.analyze_wav), ensure_ascii=False))
+        return 0
+    if args.wake_debug_record:
+        print(json.dumps(gateway.audio.wake_debug_record(), ensure_ascii=False))
+        return 0
+    if args.wake_debug_stream:
+        detected = gateway.wakeword.wait_for_wake(debug=True)
+        print(json.dumps({"ok": True, "wake": detected, "timeout": not detected}, ensure_ascii=False))
+        return 0
+    if args.stt_once:
+        text = gateway.stt.transcribe_wav(args.stt_once)
+        print(text)
+        return 0 if text else 2
+    if args.tts_once:
+        out_path = gateway.tts.synthesize_to_wav(args.tts_once, "/logs/last_tts.wav")
+        write_text_file("/logs/last_assistant_text.txt", args.tts_once)
+        gateway.audio.play_wav(out_path)
+        return 0
+    if args.voice_turn_once:
+        result = gateway.voice_turn_once(text=args.text, confirmation=args.confirmation)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result.get("ok") or result.get("route") == "discard" else 2
+    if args.wake_once:
+        result = gateway.wake_once(simulate_wake=args.simulate_wake, wake_provider=args.wake_provider)
+        return 0 if result.get("ok") else 2
+    if args.listen_loop:
+        gateway.listen_loop(simulate_wake=args.simulate_wake, wake_provider=args.wake_provider)
+        return 0
+    if args.self_test_firewall:
+        samples = [
+            "Estado de open cloud",
+            "Está en el open clamp",
+            "Estadle de la open plan",
+            "Esto es del sistema",
+            "Esto del sistema",
+            "Estado del sistema",
+            "estado del sistema",
+            "estado sistema",
+            "estatus del sistema",
+            "estado del servidor",
+            "estado servidor",
+            "estaba en el sistema",
+            "Estamos de otro June",
+            "Estal y ropa el pleno",
+            "cancelar",
+            "cancele",
+            "cantele",
+            "cantale",
+            "salir",
+            "terminar",
+            "para",
+            "parale",
+            "alto",
+            "detente",
+            "no importa",
+            "yancelan",
+            "pencilar",
+            "analiza este error del contenedor",
+        ]
+        for sample in samples:
+            print(json.dumps(gateway.firewall.classify(sample).__dict__, ensure_ascii=False))
+        return 0
+    if args.process_text is not None:
+        print(json.dumps(gateway.process_text(args.process_text, confirmation=args.confirmation), ensure_ascii=False))
+        return 0
+
+    gateway.run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

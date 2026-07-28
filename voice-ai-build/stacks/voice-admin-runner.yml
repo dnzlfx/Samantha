@@ -1,0 +1,30 @@
+services:
+  voice-admin-runner:
+    image: local/voice-admin-runner:0.1
+    container_name: voice-admin-runner
+    restart: unless-stopped
+    environment:
+      - VOICE_ADMIN_TOKEN=${VOICE_ADMIN_TOKEN:?set VOICE_ADMIN_TOKEN}
+      - PORT=8088
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - automation_internal
+    ports:
+      - "127.0.0.1:8088:8088"
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "/app/admin_runner.py", "--healthcheck-once"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  automation_internal:
+    external: true
+    name: automatizacion_automation-internal
