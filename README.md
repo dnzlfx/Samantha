@@ -6,11 +6,26 @@ Versión: 1.3.0
 
 ## 🚀 Inicio Rápido
 
+Requiere [Ollama](https://ollama.com) corriendo local. Modelos por nivel de RAM en `SETUP.md`.
+
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 python sam.py
 ```
 
 **Voice mode OFF por defecto.** Usar `--voice` para habilitar.
+
+Voz y visión traen dependencias del sistema aparte: `./install_voice.sh`, `./install_vision.sh`.
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Para contribuir, ver [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
@@ -140,13 +155,22 @@ Sistema usa PulseAudio/PipeWire automáticamente.
 ## 📁 Estructura
 
 ```
-sam.py                  - Main loop
+sam.py                  - Entrypoint y main loop
+core/
+  llm_manager.py        - Routing de modelos Ollama por intent
+  memory.py             - Memoria SQLite (~/.samantha/sam_brain.db)
+  sandbox.py            - Ejecución aislada de código
+  search_engine.py      - Búsqueda web (DuckDuckGo)
+  command_safety.py     - Gate SAFE/DANGEROUS de comandos
 modules/
   voice.py              - Voice (wake word, STT, TTS)
   vision.py             - Vision (llava, camera, OCR)
-  screen_monitor.py     - Screen monitoring (nuevo!)
-  intent_detector.py    - Intent detection
-  apis.py               - API integrations
+  screen_monitor.py     - Screen monitoring
+  intent_detector.py    - Intent detection (21 intents)
+  integrations.py       - APIs externas (clima, crypto, Telegram)
+  homelab.py            - SSH a servidores del home lab
+ui/                     - Dashboard Rich e input
+tests/                  - unittest/pytest, sin red
 ```
 
 ---

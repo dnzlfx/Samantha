@@ -217,10 +217,6 @@ pip install -r requirements.txt
 
 # If missing lxml for BeautifulSoup
 pip install lxml
-
-# If missing spacy (optional)
-pip install spacy
-python -m spacy download es_core_news_sm
 ```
 
 ## Configuration
