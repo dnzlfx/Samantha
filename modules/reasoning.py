@@ -134,9 +134,9 @@ Be concise."""
             context_str = f"\n\nKey files:\n{chr(10).join(context['files'][:5])}"
         
         # Shorter prompt
-        thinking_summary = thinking[:200] if thinking else ""
-        
-        prompt = f"""Task: {task}{context_str}
+        thinking_summary = f"\n\nPrior analysis:\n{thinking[:200]}" if thinking else ""
+
+        prompt = f"""Task: {task}{context_str}{thinking_summary}
 
 Create JSON array of steps:
 [
@@ -199,7 +199,7 @@ Keep it simple and actionable. Return ONLY JSON:"""
         """
         prev_context = ""
         if previous_results:
-            prev_context = f"\n\nPrevious step results:\n" + "\n".join(previous_results[-3:])
+            prev_context = "\n\nPrevious step results:\n" + "\n".join(previous_results[-3:])
         
         prompt = f"""Generate detailed execution instructions for this step:
 
