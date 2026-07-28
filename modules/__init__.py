@@ -1,16 +1,7 @@
 """
 Samantha modules package.
 Specialized functionality modules.
+
+Import submodules directly (``from modules.homelab import HomeLab``) so that
+pulling in one module does not drag in every module's dependencies.
 """
-
-from .homelab import HomeLab
-from .rag import RAGManager
-from .vision import VisionAnalyzer
-from .security import CVEScanner
-
-__all__ = [
-    'HomeLab',
-    'RAGManager',
-    'VisionAnalyzer',
-    'CVEScanner',
-]

@@ -19,6 +19,7 @@ if sys.prefix == sys.base_prefix and DEFAULT_VENV_PYTHON.exists():
 
 import ollama
 import json
+import logging
 import signal
 from datetime import datetime, timedelta
 from typing import Optional
@@ -28,7 +29,6 @@ import queue  # For voice command queue
 from core.search_engine import SearchEngine, QueryOptimizer
 from core.sandbox import SandboxExecutor  
 from core.memory import MemoryManager
-from modules.homelab import HomeLab
 from modules.multi_homelab import MultiHomeLab
 from modules.monitor import HomelabMonitor
 from modules.integrations import APIIntegrations
@@ -52,6 +52,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 import psutil
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -90,7 +92,7 @@ def graceful_shutdown(signum=None, frame=None):
                 console.print(f"[cyan]💡 Ahora puedes cargar esta sesión con el número: {session_num}[/cyan]")
                 console.print(f"[dim]Ubicación: {filepath}[/dim]")
             else:
-                console.print(f"[red]⚠️  No se pudo guardar la sesión[/red]")
+                console.print("[red]⚠️  No se pudo guardar la sesión[/red]")
         except Exception as e:
             console.print(f"[red]⚠️  Error guardando sesión: {e}[/red]")
     
@@ -158,7 +160,7 @@ def get_model_closest_to_8b(models):
 
 def assign_roles_with_ai(models, ai_model):
     console = Console()
-    console.print(f"\n[cyan]Configurando roles...[/cyan]")
+    console.print("\n[cyan]Configurando roles...[/cyan]")
     
     model_list = "\n".join([f"- {m['name']}" for m in models])
     prompt = f"""Asigna el MEJOR modelo para cada tarea:
@@ -309,7 +311,7 @@ def load_or_create_roles(models):
         try:
             with open(ROLES_CONFIG_FILE, 'r') as f:
                 roles = json.load(f)
-            console.print(f"\n[green]Roles cargados[/green]")
+            console.print("\n[green]Roles cargados[/green]")
             return roles
         except:
             pass
@@ -694,7 +696,7 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
             finally:
                 tts_process['pid'] = None
                 os.unlink(temp_file)
-        except Exception as e:
+        except Exception:
             pass
     
     def interrupt_tts():
@@ -740,30 +742,30 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                     
                     # Visual intents
                     if detected_intent == Intent.TAKE_PHOTO:
-                        dash.console.print(f"[dim]📸 Capturando foto...[/dim]")
+                        dash.console.print("[dim]📸 Capturando foto...[/dim]")
                         try:
                             from modules.vision import CameraCapture, VisionAnalyzer
                             camera = CameraCapture()
                             photo_path = camera.capture_frame()
                             if photo_path:
-                                dash.console.print(f"[green]📸 Foto capturada[/green]")
+                                dash.console.print("[green]📸 Foto capturada[/green]")
                                 analyzer = VisionAnalyzer()
                                 result = analyzer.analyze_image(photo_path, "Describe esta imagen en detalle en español")
                                 if result.get('success'):
-                                    dash.console.print(f"\n[cyan]🖼️ Análisis:[/cyan]")
+                                    dash.console.print("\n[cyan]🖼️ Análisis:[/cyan]")
                                     dash.console.print(result['description'])
                                     executed_any = True
                         except Exception as e:
                             dash.console.print(f"[yellow]⚠️ Vision no disponible: {e}[/yellow]")
                     
                     elif detected_intent == Intent.READ_SCREEN:
-                        dash.console.print(f"[dim]📝 Leyendo pantalla...[/dim]")
+                        dash.console.print("[dim]📝 Leyendo pantalla...[/dim]")
                         try:
                             from modules.vision import OCRProcessor
                             ocr = OCRProcessor()
                             result = ocr.extract_text_from_screen()
                             if result.get('success') and result.get('text'):
-                                dash.console.print(f"\n[cyan]📝 Texto extraído:[/cyan]")
+                                dash.console.print("\n[cyan]📝 Texto extraído:[/cyan]")
                                 dash.console.print(result['text'][:500])
                                 executed_any = True
                             else:
@@ -776,11 +778,11 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                         # Prioritize screen if monitoring
                         if detected_intent == Intent.WHAT_DO_YOU_SEE and screen_monitor and screen_monitor.screen_context['monitoring']:
                             # User wants to see current screen, not camera
-                            dash.console.print(f"[dim]📺 Analizando pantalla...[/dim]")
+                            dash.console.print("[dim]📺 Analizando pantalla...[/dim]")
                             analysis = screen_monitor.analyze_current_screen()
                             
                             if analysis:
-                                dash.console.print(f"\n[cyan]👁️ En la pantalla veo:[/cyan]")
+                                dash.console.print("\n[cyan]👁️ En la pantalla veo:[/cyan]")
                                 dash.console.print(analysis)
                                 
                                 # TTS
@@ -791,7 +793,7 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                                 dash.console.print("[yellow]No pude analizar la pantalla[/yellow]")
                         else:
                             # Normal camera analysis
-                            dash.console.print(f"[dim]👁️ Analizando...[/dim]")
+                            dash.console.print("[dim]👁️ Analizando...[/dim]")
                             try:
                                 from modules.vision import CameraCapture, VisionAnalyzer
                                 camera = CameraCapture()
@@ -807,7 +809,7 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                                         vision_context['last_description'] = description
                                         vision_context['last_analysis_time'] = datetime.now()
                                         
-                                        dash.console.print(f"\n[cyan]👁️ Veo:[/cyan]")
+                                        dash.console.print("\n[cyan]👁️ Veo:[/cyan]")
                                         dash.console.print(description)
                                         
                                         # Speak the description with interruptible TTS
@@ -1072,7 +1074,7 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                 
                 if not any(user_input.lower().startswith(cmd) for cmd in skip_cmds):
                     user_input = f"@agent {user_input}"
-                    dash.console.print(f"[dim]→ Modo Agentic activo...[/dim]\n")
+                    dash.console.print("[dim]→ Modo Agentic activo...[/dim]\n")
             
             # Commands
             if user_input.lower() in ["salir", "exit", "quit"]:
@@ -1710,7 +1712,7 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                         result = aitools.summarize(text_or_file, model=dash.current_model)
                     
                     if result['success']:
-                        dash.console.print(f"\n[cyan]📋 Resumen:[/cyan]")
+                        dash.console.print("\n[cyan]📋 Resumen:[/cyan]")
                         dash.console.print(result['summary'])
                     else:
                         dash.console.print(f"[red]Error: {result['error']}[/red]")
@@ -1772,7 +1774,7 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                         dash.console.print(f"[red]{result['error']}[/red]")
                 elif parts[1].lower() == "delete" and len(parts) >= 3:
                     aitools.preset_delete(parts[2])
-                    dash.console.print(f"[green]✓ Preset eliminado[/green]")
+                    dash.console.print("[green]✓ Preset eliminado[/green]")
                 else:
                     dash.console.print("[cyan]Uso: preset | preset save <nombre> <modelo> | preset load <nombre>[/cyan]")
                 continue
@@ -1888,7 +1890,7 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                     continue
                 result = apis.get_ip_info()
                 if result['success']:
-                    dash.console.print(f"\n[cyan]🌐 Tu IP pública:[/cyan]")
+                    dash.console.print("\n[cyan]🌐 Tu IP pública:[/cyan]")
                     dash.console.print(f"  IP: {result['ip']}")
                     dash.console.print(f"  Ciudad: {result['city']}")
                     dash.console.print(f"  Región: {result['region']}")
@@ -1914,7 +1916,7 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                     dash.console.print(result['summary'][:800])
                     dash.console.print(f"\n[dim]{result['url']}[/dim]\n")
                 else:
-                    dash.console.print(f"[yellow]No encontrado en Wikipedia[/yellow]")
+                    dash.console.print("[yellow]No encontrado en Wikipedia[/yellow]")
                 continue
             
             # GitHub search
@@ -2060,10 +2062,10 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                 result = apis.search_recipe(query)
                 if result['success']:
                     dash.console.print(f"\n[cyan]🍳 {result['name']}[/cyan] ({result['area']})")
-                    dash.console.print(f"\n[bold]Ingredientes:[/bold]")
+                    dash.console.print("\n[bold]Ingredientes:[/bold]")
                     for ing in result['ingredients']:
                         dash.console.print(f"  • {ing}")
-                    dash.console.print(f"\n[bold]Instrucciones:[/bold]")
+                    dash.console.print("\n[bold]Instrucciones:[/bold]")
                     dash.console.print(result['instructions'][:500])
                     if result.get('youtube'):
                         dash.console.print(f"\n[dim]Video: {result['youtube']}[/dim]")
@@ -2080,10 +2082,10 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                 result = apis.search_cocktail(query)
                 if result['success']:
                     dash.console.print(f"\n[cyan]🍹 {result['name']}[/cyan] ({result['glass']})")
-                    dash.console.print(f"\n[bold]Ingredientes:[/bold]")
+                    dash.console.print("\n[bold]Ingredientes:[/bold]")
                     for ing in result['ingredients']:
                         dash.console.print(f"  • {ing}")
-                    dash.console.print(f"\n[bold]Preparación:[/bold]")
+                    dash.console.print("\n[bold]Preparación:[/bold]")
                     dash.console.print(result['instructions'])
                 else:
                     dash.console.print("[dim]Cocktail no encontrado[/dim]")
@@ -2136,7 +2138,7 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                     continue
                 result = apis.get_next_spacex_launch()
                 if result['success']:
-                    dash.console.print(f"\n[cyan]🚀 SpaceX Próximo Lanzamiento[/cyan]")
+                    dash.console.print("\n[cyan]🚀 SpaceX Próximo Lanzamiento[/cyan]")
                     dash.console.print(f"  Misión: {result['name']}")
                     dash.console.print(f"  Fecha: {result['date_utc']}")
                     if result.get('webcast'):
@@ -2149,7 +2151,7 @@ CONTEXTO: Arch Linux | HomeLab: root@192.168.0.116"""
                 if data:
                     result = apis.generate_qr_url(data)
                     if result['success']:
-                        dash.console.print(f"\n[cyan]📱 QR Code generado:[/cyan]")
+                        dash.console.print("\n[cyan]📱 QR Code generado:[/cyan]")
                         dash.console.print(f"[dim]{result['url']}[/dim]\n")
                 continue
             
@@ -2690,7 +2692,7 @@ Sé conciso pero completo."""
                             if step.result:
                                 analysis = error_learner.analyze_failure(step.description, step.result)
                                 if analysis.get('stored'):
-                                    dash.console.print(f"[dim]Stored error pattern for future prevention[/dim]")
+                                    dash.console.print("[dim]Stored error pattern for future prevention[/dim]")
                     
                     # Store task
                     task_memory.store_task(
@@ -2705,7 +2707,7 @@ Sé conciso pero completo."""
                         learnings=f"{done_count}/{len(steps)} steps completed"
                     )
                     
-                    dash.console.print(f"[dim]📚 Task stored in memory[/dim]")
+                    dash.console.print("[dim]📚 Task stored in memory[/dim]")
                     
                 except ImportError as e:
                     dash.console.print(f"[red]Agent mode unavailable: {e}[/red]")
@@ -2857,7 +2859,7 @@ Sé conciso pero completo."""
                                         dash.console.print(content[:2000] + "\n[dim]... (truncado)[/dim]")
                                     else:
                                         dash.console.print(content)
-                                    dash.console.print(f"[cyan]═══ FIN ═══[/cyan]\n")
+                                    dash.console.print("[cyan]═══ FIN ═══[/cyan]\n")
                                     
                                     # Options
                                     dash.console.print("[cyan]Opciones:[/cyan]")
@@ -2940,12 +2942,12 @@ IMPORTANTE: Responde SOLO con el código mejorado. Sin explicaciones. Solo códi
                                                 # Handle response differently based on mode
                                                 if is_review and not is_modify:
                                                     # Review mode - just show the opinion/analysis
-                                                    dash.console.print(f"[green]═══ ANÁLISIS DE SAM ═══[/green]")
+                                                    dash.console.print("[green]═══ ANÁLISIS DE SAM ═══[/green]")
                                                     for chunk in ollama.chat(model=current_model, messages=messages, stream=True):
                                                         c = chunk['message']['content']
                                                         print(c, end='', flush=True)
                                                     print()
-                                                    dash.console.print(f"[green]═══ FIN ═══[/green]")
+                                                    dash.console.print("[green]═══ FIN ═══[/green]")
                                                     # No save prompt for reviews
                                                 else:
                                                     # Modify mode - extract code and offer to save
@@ -2976,9 +2978,9 @@ IMPORTANTE: Responde SOLO con el código mejorado. Sin explicaciones. Solo códi
                                                             else:
                                                                 continue
                                                     
-                                                    dash.console.print(f"[green]═══ CÓDIGO GENERADO ═══[/green]")
+                                                    dash.console.print("[green]═══ CÓDIGO GENERADO ═══[/green]")
                                                     dash.console.print(new_content)
-                                                    dash.console.print(f"[green]═══ FIN ═══[/green]")
+                                                    dash.console.print("[green]═══ FIN ═══[/green]")
                                                     
                                                     messages.append({"role": "assistant", "content": new_content})
                                                     GLOBAL_CLEANUP_STATE['messages'] = messages
@@ -3040,10 +3042,10 @@ IMPORTANTE: Responde SOLO con el código mejorado. Sin explicaciones. Solo códi
                             is_dangerous = any(danger_re.search(pattern, cmd) for pattern in dangerous_patterns)
                             
                             if is_dangerous:
-                                dash.console.print(f"\n[bold red]⚠️  COMANDO PELIGROSO DETECTADO ⚠️[/bold red]")
+                                dash.console.print("\n[bold red]⚠️  COMANDO PELIGROSO DETECTADO ⚠️[/bold red]")
                                 dash.console.print(f"[yellow]Comando: {cmd}[/yellow]")
-                                dash.console.print(f"[dim]Este comando puede causar daño irreversible.[/dim]")
-                                dash.console.print(f"[cyan]¿Ejecutar de todos modos? (escribir 'CONFIRMO'):[/cyan] ", end='')
+                                dash.console.print("[dim]Este comando puede causar daño irreversible.[/dim]")
+                                dash.console.print("[cyan]¿Ejecutar de todos modos? (escribir 'CONFIRMO'):[/cyan] ", end='')
                                 
                                 confirm = input().strip()
                                 if confirm != "CONFIRMO":
@@ -3086,7 +3088,7 @@ Pregunta del usuario: {question}"""
                                         messages.append({"role": "user", "content": ai_query})
                                         
                                         # Generate AI response
-                                        dash.console.print(f"\n[bold cyan]Sam[/bold cyan]: ", end='')
+                                        dash.console.print("\n[bold cyan]Sam[/bold cyan]: ", end='')
                                         try:
                                             response = ''
                                             for chunk in ollama.chat(model=current_model, messages=messages, stream=True):
@@ -3160,9 +3162,9 @@ Pregunta del usuario: {question}"""
                     is_dangerous = any(danger_re.search(pattern, command) for pattern in dangerous_patterns)
                     
                     if is_dangerous:
-                        dash.console.print(f"\n[bold red]⚠️  COMANDO PELIGROSO DETECTADO ⚠️[/bold red]")
+                        dash.console.print("\n[bold red]⚠️  COMANDO PELIGROSO DETECTADO ⚠️[/bold red]")
                         dash.console.print(f"[yellow]Comando: {command}[/yellow]")
-                        dash.console.print(f"[cyan]Escribir 'CONFIRMO' para ejecutar:[/cyan] ", end='')
+                        dash.console.print("[cyan]Escribir 'CONFIRMO' para ejecutar:[/cyan] ", end='')
                         if input().strip() != "CONFIRMO":
                             dash.console.print("[green]Comando cancelado.[/green]")
                             continue
@@ -3584,7 +3586,7 @@ Servicios: {diag.get('services_running', 0)} activos"""
                     continue
                 
                 if not executed_any:
-                    dash.console.print(f"[dim]🤖 Detectando intenciones...[/dim]")
+                    dash.console.print("[dim]🤖 Detectando intenciones...[/dim]")
                 executed_any = True
                 
                 # Wikipedia (biografías)
@@ -3646,10 +3648,10 @@ Servicios: {diag.get('services_running', 0)} activos"""
                         result = apis.search_recipe(entity)
                         if result['success']:
                             dash.console.print(f"\n[cyan]🍳 {result['name']}[/cyan] ({result['area']})")
-                            dash.console.print(f"\n[bold]Ingredientes:[/bold]")
+                            dash.console.print("\n[bold]Ingredientes:[/bold]")
                             for ing in result['ingredients'][:10]:
                                 dash.console.print(f"  • {ing}")
-                            dash.console.print(f"\n[bold]Instrucciones:[/bold]")
+                            dash.console.print("\n[bold]Instrucciones:[/bold]")
                             dash.console.print(result['instructions'][:500])
                             if result.get('youtube'):
                                 dash.console.print(f"\n[dim]Video: {result['youtube']}[/dim]")
@@ -3671,10 +3673,10 @@ Servicios: {diag.get('services_running', 0)} activos"""
                 # IP Info
                 elif detected_intent == Intent.IP_INFO:
                     if not is_offline():
-                        dash.console.print(f"[dim]🌐 IP Info[/dim]")
+                        dash.console.print("[dim]🌐 IP Info[/dim]")
                         result = apis.get_my_ip()
                         if result.get('success'):
-                            dash.console.print(f"\n[cyan]🌐 IP Info[/cyan]")
+                            dash.console.print("\n[cyan]🌐 IP Info[/cyan]")
                             dash.console.print(f"  IP: {result.get('ip', 'N/A')}")
                             dash.console.print(f"  Ciudad: {result.get('city', 'N/A')}")
                             dash.console.print(f"  País: {result.get('country', 'N/A')}")
@@ -4244,7 +4246,7 @@ AHORA responde la pregunta original del usuario usando estos datos."""
                         # Offer to execute the first valid command found
                         if suggested_commands:
                             cmd_to_run = suggested_commands[0].split('\n')[0].strip()  # First line only
-                            dash.console.print(f"\n[cyan]💡 ¿Ejecutar este comando?[/cyan]")
+                            dash.console.print("\n[cyan]💡 ¿Ejecutar este comando?[/cyan]")
                             dash.console.print(f"[dim]{cmd_to_run}[/dim]")
                             
                             try:
@@ -4343,7 +4345,7 @@ Error: {result['error'] if result['error'] else 'Ninguno'}"""
                                     GLOBAL_CLEANUP_STATE['current_model'] = current_model
                                     dash.console.print(f"[green]✅ Modelo cambiado a: {current_model}[/green]")
                                 else:
-                                    dash.console.print(f"[red]Número inválido[/red]")
+                                    dash.console.print("[red]Número inválido[/red]")
                             except (ValueError, KeyboardInterrupt):
                                 dash.console.print("[yellow]Selección cancelada[/yellow]")
                     else:
@@ -4572,11 +4574,11 @@ if __name__ == "__main__":
             GLOBAL_CLEANUP_STATE['thinking_model'] = thinking_model
             GLOBAL_CLEANUP_STATE['code_model'] = code_model
             
-            console.print(f"[cyan]══════════════════════════════════════[/cyan]")
-            console.print(f"[green]✓ Configuración agentic lista[/green]")
+            console.print("[cyan]══════════════════════════════════════[/cyan]")
+            console.print("[green]✓ Configuración agentic lista[/green]")
             console.print(f"[cyan]  Thinking: {thinking_model}[/cyan]")
             console.print(f"[cyan]  Código:   {code_model}[/cyan]")
-            console.print(f"[cyan]══════════════════════════════════════[/cyan]\n")
+            console.print("[cyan]══════════════════════════════════════[/cyan]\n")
             
             # Use code model as the "current" model for regular operations
             modelo_inicial = code_model
