@@ -1,4 +1,5 @@
-# Samantha v1.3.0 Dependencies
+# Samantha runtime dependencies
+# Dev/test tooling lives in requirements-dev.txt
 
 # Core AI Integration
 ollama>=0.1.0
@@ -7,30 +8,23 @@ ollama>=0.1.0
 rich>=13.0.0
 
 # Web Search and Scraping
-duckduckgo-search>=4.0.0
+ddgs>=9.0.0                 # successor to duckduckgo-search
 beautifulsoup4>=4.12.0
-lxml>=4.9.0
+lxml>=4.9.0                 # parser used by BeautifulSoup in core/search_engine.py
 requests>=2.31.0
 
 # System Monitoring
 psutil>=5.9.0
 
-# Database
-sqlalchemy>=2.0.0
-
 # Image Processing (for vision features)
 Pillow>=10.0.0
-
-# NLP for Query Optimization
-spacy>=3.7.0
-
-# Optional: Advanced RAG
-# chromadb>=0.4.0
 
 # Security and SSH
 paramiko>=3.4.0
 
 # Utilities
 python-dotenv>=1.0.0
-python-dateutil>=2.8.0
-pytz>=2023.3
+
+# Removed (declared but never imported): sqlalchemy — persistence uses raw
+# sqlite3 from the stdlib; spacy, pytz, python-dateutil.
+# Optional: chromadb>=0.4.0 for advanced RAG.

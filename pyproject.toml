@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "jarvis.py", "voice-ai-build", "voice-ai-remote"]
+
+[tool.ruff.lint]
+# Start narrow: pyflakes (real bugs) + a few unambiguous rules.
+# Widen once the existing violations are burned down.
+select = ["F", "E9", "W6", "B006", "B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
