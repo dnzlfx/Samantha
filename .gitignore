@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# Local environment / secrets — never commit real credentials.
+# Ship .env.example only; keep the real .env out of the repository.
+.env
+.env.local
